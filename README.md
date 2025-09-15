@@ -311,3 +311,7 @@ fn body_add_hook(comp: *Body, _: kn.Entity, world: *kn.App) !void {
 }
 
 ```
+
+## Contribution
+
+Currently do not accept pull request. This is the core of a game I've been working on. Many changes ahead. Feel free to make issues.
