@@ -8,6 +8,8 @@ Works great with any backend. Raylib, Sokol or your own
 
 ![knoedel](knoedel.svg)
 
+**zig version: 0.15.1**
+
 ## Features
 
 - Intuitive plugin API.
