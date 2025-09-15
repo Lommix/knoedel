@@ -1,6 +1,6 @@
-# Knödel-ECS
-
 ![knoedel](knoedel.svg)
+
+# Knödel-ECS
 
 Single file data oriented application framework written in Zig.
 
