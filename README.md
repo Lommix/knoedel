@@ -1,12 +1,12 @@
 # Knödel-ECS
 
+![knoedel](knoedel.svg)
+
 Single file data oriented application framework written in Zig.
 
 Heavily inspired by my favorite rust ECS `Bevy`.
 
 Works great with any backend. Raylib, Sokol or your own
-
-![knoedel](knoedel.svg)
 
 **zig version: 0.15.1**
 
