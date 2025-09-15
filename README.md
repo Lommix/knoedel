@@ -164,7 +164,7 @@ pub fn plugin(world: *kn.App) !void {
     try app.addSystemEx(Schedule.update, &my_system, kn.And(kn.InState(Gamestate.menu), OnTimer(1/60)));
     // use tuples to register multiple systems at once
     try app.addSystem(Schedule.update, .{&asys, &bsys, &csys});
-    // chains respect order, tuples in chance run in parallel
+    // chains respect order, tuples in chains run in parallel
     try app.addSystem(Schedule.update, kn.Chain{&asys, .{&b1sys, &b2sys}, &csys});
 }
 
