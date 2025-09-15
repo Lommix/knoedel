@@ -1019,11 +1019,9 @@ pub fn App(comptime desc: AppDesc) type {
                 try self.reg.add(self.frame_gpa, cmd);
             }
 
-            // TODO: finish this
             pub fn addChild(self: *const Self, parent: Entity, child: Entity) EcsError!void {
-                _ = self;
-                _ = parent;
-                _ = child;
+                const cmd = try addChildCommand(self.frame_gpa, parent, child);
+                try self.reg.add(self.frame_gpa, cmd);
             }
 
             pub fn fromWorld(world: *World) EcsError!Self {
@@ -1064,6 +1062,37 @@ pub fn App(comptime desc: AppDesc) type {
                 .run = (struct {
                     fn run(_: *anyopaque, world: *World) EcsError!void {
                         try world.resources.remove(world.memtator.world(), R);
+                    }
+                }).run,
+            };
+        }
+
+        fn addChildCommand(allocator: std.mem.Allocator, parent: Entity, child: Entity) EcsError!Command {
+            const Args = struct {
+                parent: Entity,
+                child: Entity,
+            };
+
+            var arg_ptr = try allocator.create(Args);
+            arg_ptr.parent = parent;
+            arg_ptr.child = child;
+
+            return Command{
+                .ptr = undefined,
+                .run = (struct {
+                    fn run(ctx: *anyopaque, world: *World) EcsError!void {
+                        const gpa = world.memtator.world();
+                        const args: *Args = @ptrCast(@alignCast(ctx));
+
+                        if (world.archtypes.getSingle(args.parent, Children)) |c| {
+                            try c.items.append(gpa, args.child);
+                        } else {
+                            var c = Children{};
+                            try c.items.append(gpa, args.child);
+                            try world.archtypes.add(gpa, world.world_tick, args.parent, c);
+                        }
+
+                        try world.archtypes.add(gpa, world.world_tick, args.child, Parent{ .entity = args.parent });
                     }
                 }).run,
             };
