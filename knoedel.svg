@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="46.745 163.926 670.218 248.081" xmlns:bx="https://boxy-svg.com">
+  <defs>
+    <bx:export>
+      <bx:file format="png" path="Knoedel ECS Banner.png"/>
+    </bx:export>
+  </defs>
+  <desc>Knoedel ECS Banner</desc>
+  <title>Knoedel ECS Banner</title>
+  <rect x="-12.269" y="113.399" width="780.295" height="370.906" style="stroke: rgb(255, 255, 255); fill: rgb(255, 255, 255);"/>
+  <path style="stroke: rgb(204, 175, 129); fill: rgb(249, 214, 120); stroke-width: 0px;" d="M 116.405 189.602 C 46.178 230.66 55.217 295.406 65.458 320.129 C 96.526 395.135 292.796 450.78 334.625 298.975 C 362.566 197.571 261.999 184.244 204.144 184.244 C 156.728 184.244 153.913 167.673 116.405 189.602 Z"/>
+  <g transform="matrix(1, 0, 0, 1, 64.842104, 131.368427)">
+    <ellipse style="stroke: rgb(0, 0, 0);" cx="98.947" cy="75.158" rx="17.263" ry="16"/>
+    <ellipse style="stroke: rgb(0, 0, 0); fill: rgb(255, 255, 255);" cx="94.106" cy="71.369" rx="8.211" ry="8.421"/>
+  </g>
+  <g transform="matrix(1, 0, 0, 1, 129.684574, 135.999882)">
+    <ellipse style="stroke: rgb(0, 0, 0);" cx="98.947" cy="75.158" rx="17.263" ry="16"/>
+    <ellipse style="stroke: rgb(0, 0, 0); fill: rgb(255, 255, 255);" cx="96.211" cy="71.369" rx="8.211" ry="8.421"/>
+    <ellipse style="stroke: rgb(0, 0, 0); fill: rgb(255, 255, 255);" cx="-39.489" cy="-77.388" rx="2.615" ry="2.302" transform="matrix(-1, 0, 0, -1, 0, 0)"/>
+    <ellipse style="stroke: rgb(0, 0, 0); fill: rgb(255, 255, 255); stroke-width: 1;" cx="-108.08" cy="-79.837" rx="2.615" ry="2.302" transform="matrix(-1, 0, 0, -1, 0, 0)"/>
+  </g>
+  <path style="stroke: rgb(0, 0, 0); stroke-linecap: round; stroke-linejoin: round;" d="M 143.497 187.387 L 185.627 199.116 L 186.398 193.574 C 184.717 189.516 148.072 177.109 148.072 177.358 C 148.072 177.607 143.497 187.636 143.497 187.387 Z"/>
+  <path style="stroke: rgb(0, 0, 0); stroke-width: 1; stroke-linecap: round; stroke-linejoin: round;" d="M 207.234 202.106 L 246.083 189.405 L 238.114 180.191 C 238.114 180.191 207.742 193.561 206.883 196.066 C 206.024 198.571 207.234 202.355 207.234 202.106 Z"/>
+  <path style="stroke: rgb(219, 187, 120); stroke-opacity: 0; stroke-width: 0px;" d="M 162.287 229.414 C 201.246 236.125 219.537 229.321 224.814 232.249 C 230.091 235.177 219.388 245.518 219.388 245.518 C 205.039 259.867 175.018 258.774 164.263 243.447 C 163.449 242.285 155.645 228.27 162.287 229.414 Z"/>
+  <ellipse style="stroke: rgba(74, 74, 74, 0); stroke-width: 1; fill: rgb(245, 181, 181);" cx="251.381" cy="233.472" rx="13.269" ry="7.765"/>
+  <path style="fill: rgb(216, 216, 216); stroke-linecap: round; stroke: rgb(255, 248, 248);" d="M 245.612 236.302 L 252.222 229.95"/>
+  <path style="fill: rgb(216, 216, 216); stroke-linecap: round; stroke: rgb(255, 248, 248);" d="M 253.389 235.784 L 258.185 230.987"/>
+  <ellipse style="stroke: rgba(74, 74, 74, 0); stroke-width: 1; fill: rgb(245, 181, 181);" cx="138.538" cy="229.432" rx="13.269" ry="7.765"/>
+  <path style="fill: rgb(216, 216, 216); stroke-linecap: round; stroke: rgb(255, 248, 248); stroke-width: 1;" d="M 132.769 232.262 L 139.379 225.91"/>
+  <path style="fill: rgb(216, 216, 216); stroke-linecap: round; stroke: rgb(255, 248, 248); stroke-width: 1;" d="M 140.546 231.744 L 145.342 226.947"/>
+  <text style="fill: rgb(51, 51, 51); font-family: &quot;CaskaydiaMono Nerd Font&quot;; font-size: 47.9px; white-space: pre;" x="354.741" y="232.075">Knödel - ECS</text>
+  <text style="fill: rgb(51, 51, 51); font-family: &quot;CaskaydiaCove Nerd Font&quot;; font-size: 28px; white-space: pre;" transform="matrix(0.857069, 0, 0, 0.857069, -3.178184, -18.263247)"><tspan x="417.27" y="341.234">light weight single file</tspan><tspan x="417.27" dy="1em">​</tspan><tspan>Entity Component System</tspan></text>
+  <g transform="matrix(1, 0, 0, 1, 177.115774, 31.70794)">
+    <g fill="#f7a41d" transform="matrix(0.305344, 0, 0, 0.305344, 285.545449, 306.259897)" style="">
+      <g>
+        <polygon points="46,22 28,44 19,30"/>
+        <polygon points="46,22 33,33 28,44 22,44 22,95 31,95 20,100 12,117 0,117 0,22" shape-rendering="crispEdges"/>
+        <polygon points="31,95 12,117 4,106"/>
+      </g>
+      <g>
+        <polygon points="56,22 62,36 37,44"/>
+        <polygon points="56,22 111,22 111,44 37,44 56,32" shape-rendering="crispEdges"/>
+        <polygon points="116,95 97,117 90,104"/>
+        <polygon points="116,95 100,104 97,117 42,117 42,95" shape-rendering="crispEdges"/>
+        <polygon points="150,0 52,117 3,140 101,22"/>
+      </g>
+      <g>
+        <polygon points="141,22 140,40 122,45"/>
+        <polygon points="153,22 153,117 106,117 120,105 125,95 131,95 131,45 122,45 132,36 141,22" shape-rendering="crispEdges"/>
+        <polygon points="125,95 130,110 106,117"/>
+      </g>
+    </g>
+    <g fill="#121212" transform="matrix(0.305344, 0, 0, 0.305344, 285.545449, 306.259897)" style="">
+      <g>
+        <polygon points="260,22 260,37 229,40 177,40 177,22" shape-rendering="crispEdges"/>
+        <polygon points="260,37 207,99 207,103 176,103 229,40 229,37"/>
+        <polygon points="261,99 261,117 176,117 176,103 206,99" shape-rendering="crispEdges"/>
+      </g>
+      <rect x="272" y="22" shape-rendering="crispEdges" width="22" height="95"/>
+      <g>
+        <polygon points="394,67 394,106 376,106 376,81 360,70 346,67" shape-rendering="crispEdges"/>
+        <polygon points="360,68 376,81 346,67"/>
+        <path d="M394,106c-10.2,7.3-24,12-37.7,12c-29,0-51.1-20.8-51.1-48.3c0-27.3,22.5-48.1,52-48.1c14.3,0,29.2,5.5,38.9,14l-13,15c-7.1-6.3-16.8-10-25.9-10c-17,0-30.2,12.9-30.2,29.5c0,16.8,13.3,29.6,30.3,29.6c5.7,0,12.8-2.3,19-5.5L394,106z"/>
+      </g>
+    </g>
+  </g>
+  <path style="stroke: rgb(0, 0, 0); stroke-linecap: round; stroke-linejoin: round; stroke-width: 0px; fill: rgb(210, 180, 99);" d="M 74.085 229.156 C 50.369 260.682 55.124 297.354 65.24 322.231 C 82.066 363.609 142.08 384.287 156.631 388.353 C 206.683 402.338 263.728 392.633 284.574 373.285 C 207.753 428.372 15.97 315.848 74.085 229.156 Z"/>
+  <path style="stroke: rgb(210, 55, 55); stroke-width: 0px; fill: rgb(234, 134, 134);" d="M 172.143 250.629 C 171.854 250.586 179.21 243.054 191.57 243.054 C 199.267 243.054 208.302 252.467 207.32 253.033 C 197.394 257.883 179.221 255.556 172.143 250.629 Z"/>
+</svg>

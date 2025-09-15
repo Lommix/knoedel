@@ -1,0 +1,10 @@
+.{
+    .name = .knoedel,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{},
+    .paths = .{
+        "src",
+    },
+    .fingerprint = 0x22e99f8b1af836b0,
+}
