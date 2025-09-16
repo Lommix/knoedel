@@ -14,11 +14,11 @@ Works great with any backend. Raylib, Sokol or your own
 
 - Intuitive plugin API.
 - Lock free auto concurrency.
-- Resources and system locals.
-- Archtype based storage.
+- Queries, resources and system locals.
 - Component hooks.
-- Single file. Easy to copy, modify and own.
 - Event and state extensions.
+- Archtype based storage.
+- Single file. Easy to copy, modify and own.
 
 Example:
 
@@ -314,4 +314,5 @@ fn body_add_hook(comp: *Body, _: kn.Entity, world: *kn.App) !void {
 
 ## Contribution
 
-Currently do not accept pull request. This is the core of a game I've been working on. Many changes ahead. Feel free to make issues.
+Currently do not accept pull request, but I am open to bug reports and improvements as issues.
+This is the core of a game I've been working on. Many changes ahead.

@@ -199,8 +199,6 @@ pub const Children = struct {
 /// Needs to have a fixed position in memory and called init on.
 pub fn App(comptime desc: AppDesc) type {
     return struct {
-        pub const ComponentMask = std.bit_set.IntegerBitSet(desc.max_components);
-        pub const VoidComponentMask = ComponentMask.initEmpty();
         // TODO: finally finish the naming refactoring
         const World = @This();
         //-------------------------
@@ -427,12 +425,7 @@ pub fn App(comptime desc: AppDesc) type {
             const ScheduleID = u32;
             /// a system's mem represntation
             pub const OpaqueSystem = struct {
-                //----------
-                // TODO: replace with access
-                // read_mask: ComponentMask,
-                // write_mask: ComponentMask,
                 access: Access,
-                //----------
                 ptr: *anyopaque,
                 run: SystemRegistry.SystemFn,
                 condition: ?SystemRegistry.ConditionFn = null,
