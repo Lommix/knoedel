@@ -209,7 +209,7 @@ pub fn App(comptime desc: AppDesc) type {
             count: u32 = 0,
         } = .{},
         // ---------------------------------------
-        archtypes: ArchRegistry = .{},
+        components: ComponentRegistry = .{},
         resources: ResourceRegistry = .{},
         systems: SystemRegistry = .{},
         commands: CommandRegistry = .{},
@@ -222,7 +222,7 @@ pub fn App(comptime desc: AppDesc) type {
             self.commands = .{};
             self.entities = .{};
             self.resources = .{};
-            self.archtypes = .{};
+            self.components = .{};
             self.hooks = .{};
             self.world_tick = 0;
             try self.memtator.init(gpa, desc.max_frame_mem);
@@ -236,7 +236,7 @@ pub fn App(comptime desc: AppDesc) type {
 
         ///! valid check
         pub fn isValid(self: *const World, ent: Entity) bool {
-            return self.archtypes.entity_lookup.contains(ent);
+            return self.components.entity_lookup.contains(ent);
         }
 
         /// end?
@@ -348,17 +348,17 @@ pub fn App(comptime desc: AppDesc) type {
 
             // ----------------------------------------
             // hook
-            const mask = self.archtypes.mask_lookup.get(ent).?;
+            const mask = self.components.mask_lookup.get(ent).?;
             const hook_mask = mask.intersectWith(self.hooks.has_despawn_hook);
             var it = hook_mask.iterator();
             while (it.next()) |flag| {
-                const ptr = self.archtypes.getSingleOpaque(ent, flag).?;
+                const ptr = self.components.getSingleOpaque(ent, flag).?;
                 try self.hooks.runDespawnHook(flag, ptr, ent, self);
             }
             // ----------------------------------------
 
             // despawn children
-            if (self.archtypes.getSingle(ent, Children)) |children| {
+            if (self.components.getSingle(ent, Children)) |children| {
                 for (children.items.items) |child| {
                     try self.despawn_with_children(child);
                 }
@@ -366,14 +366,14 @@ pub fn App(comptime desc: AppDesc) type {
                 children.deinit(self.memtator.world());
             }
 
-            try self.archtypes.despawn(self.memtator.world(), ent);
+            try self.components.despawn(self.memtator.world(), ent);
         }
 
         fn despawn(self: *World, ent: Entity) EcsError!void {
             if (!self.isValid(ent)) return;
             // remove from parent children
-            if (self.archtypes.getSingle(ent, Parent)) |parent| {
-                if (self.archtypes.getSingle(parent.entity, Children)) |children| {
+            if (self.components.getSingle(ent, Parent)) |parent| {
+                if (self.components.getSingle(parent.entity, Children)) |children| {
                     var index: ?usize = null;
                     for (children.items.items, 0..) |child, i| {
                         if (child == ent) index = i;
@@ -388,7 +388,7 @@ pub fn App(comptime desc: AppDesc) type {
 
         /// total used entities
         pub fn entityCount(self: *World) usize {
-            return @intCast(self.archtypes.entity_lookup.size);
+            return @intCast(self.components.entity_lookup.size);
         }
 
         /// add a plugin. Any struct that implements a `plugin(app:*App) !void` is considered a plugin.
@@ -553,6 +553,10 @@ pub fn App(comptime desc: AppDesc) type {
 
                     if (@hasDecl(PT, "addAccess")) {
                         PT.addAccess(&access);
+                    }
+
+                    if (@hasDecl(PT, "SelfValidate")) {
+                        PT.SelfValidate();
                     }
                 }
 
@@ -1077,15 +1081,15 @@ pub fn App(comptime desc: AppDesc) type {
                         const gpa = world.memtator.world();
                         const args: *Args = @ptrCast(@alignCast(ctx));
 
-                        if (world.archtypes.getSingle(args.parent, Children)) |c| {
+                        if (world.components.getSingleAndUpdate(args.parent, Children)) |c| {
                             try c.items.append(gpa, args.child);
                         } else {
                             var c = Children{};
                             try c.items.append(gpa, args.child);
-                            try world.archtypes.add(gpa, world.world_tick, args.parent, c);
+                            try world.components.add(gpa, world.world_tick, args.parent, c);
                         }
 
-                        try world.archtypes.add(gpa, world.world_tick, args.child, Parent{ .entity = args.parent });
+                        try world.components.add(gpa, world.world_tick, args.child, Parent{ .entity = args.parent });
                     }
                 }).run,
             };
@@ -1135,11 +1139,11 @@ pub fn App(comptime desc: AppDesc) type {
                             const flag = CompFlag.getFlag(C);
 
                             if (world.hooks.remove_hooks.contains(flag)) {
-                                const comp = world.archtypes.getSingle(ent.*, C).?;
+                                const comp = world.components.getSingle(ent.*, C).?;
                                 try world.hooks.runRemoveHook(flag, comp, ent.*, world);
                             }
 
-                            try world.archtypes.remove(world.memtator.world(), ent.*, C);
+                            try world.components.remove(world.memtator.world(), ent.*, C);
                         }
                     }
                 }).run,
@@ -1167,14 +1171,27 @@ pub fn App(comptime desc: AppDesc) type {
                         const args: *Args = @ptrCast(@alignCast(ctx));
 
                         if (!isTuple(ArgType)) {
+                            switch (@typeInfo(@TypeOf(bundle))) {
+                                .@"struct" => {},
+                                .@"enum" => {},
+                                else => @compileError("component in insert must be of type struct, `" ++ @typeName(@TypeOf(bundle)) ++ "` given"),
+                            }
+
                             const flag = CompFlag.getFlag(@TypeOf(bundle));
                             try world.hooks.runAddedHook(flag, &args.bundle, args.ent, world);
-                            try world.archtypes.add(world.memtator.world(), world.world_tick, args.ent, args.bundle);
+                            try world.components.add(world.memtator.world(), world.world_tick, args.ent, args.bundle);
                             return;
                         }
 
                         inline for (args.bundle, 0..) |comp, i| {
                             const CompType: type = @TypeOf(comp);
+
+                            switch (@typeInfo(CompType)) {
+                                .@"struct" => {},
+                                .@"enum" => {},
+                                else => @compileError("component in bundle must be of type struct, `" ++ @typeName(CompType) ++ "` given"),
+                            }
+
                             // ---------------------
                             // spawn children
                             if (isTuple(CompType)) {
@@ -1182,15 +1199,15 @@ pub fn App(comptime desc: AppDesc) type {
                                 const cmp = try insertCommand(world.memtator.frame(), child_ent, comp);
                                 try cmp.run(cmp.ptr, world);
 
-                                if (world.archtypes.getSingle(args.ent, Children)) |c| {
+                                if (world.components.getSingle(args.ent, Children)) |c| {
                                     try c.items.append(gpa, child_ent);
                                 } else {
                                     var c = Children{};
                                     try c.items.append(gpa, child_ent);
-                                    try world.archtypes.add(world.memtator.world(), world.world_tick, args.ent, c);
+                                    try world.components.add(world.memtator.world(), world.world_tick, args.ent, c);
                                 }
 
-                                try world.archtypes.add(world.memtator.world(), world.world_tick, child_ent, Parent{ .entity = args.ent });
+                                try world.components.add(world.memtator.world(), world.world_tick, child_ent, Parent{ .entity = args.ent });
                             } else {
                                 const info = @typeInfo(ArgType);
                                 if (!info.@"struct".fields[i].is_comptime) {
@@ -1201,7 +1218,7 @@ pub fn App(comptime desc: AppDesc) type {
                             // ---------------------
                         }
 
-                        try world.archtypes.addBundle(world.memtator.world(), world.world_tick, args.ent, args.bundle);
+                        try world.components.addBundle(world.memtator.world(), world.world_tick, args.ent, args.bundle);
                     }
                 }).run,
             };
@@ -1298,6 +1315,32 @@ pub inline fn isTuple(comptime T: type) bool {
 // ---------------------------------------
 // resource
 // ---------------------------------------
+const Resource = struct {
+    ctx: *anyopaque,
+    deinit: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator) void,
+
+    pub fn cast(ptr: *anyopaque, comptime T: type) *T {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    pub fn init(res: anytype, alloc: std.mem.Allocator) Resource {
+        const ptr = alloc.create(@TypeOf(res)) catch @panic("oom");
+        ptr.* = res;
+        return Resource{
+            .ctx = ptr,
+            .deinit = (struct {
+                fn deinit(p: *anyopaque, allocator: std.mem.Allocator) void {
+                    var r = Resource.cast(p, @TypeOf(res));
+                    if (@hasDecl(@TypeOf(res), "deinit")) {
+                        r.deinit(allocator);
+                    }
+                    allocator.destroy(r);
+                }
+            }).deinit,
+        };
+    }
+};
+
 pub const ResourceRegistry = struct {
     const ResID = u32;
     const TypeID = u32;
@@ -1341,33 +1384,7 @@ pub const ResourceRegistry = struct {
     }
 };
 
-const Resource = struct {
-    ctx: *anyopaque,
-    deinit: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator) void,
-
-    pub fn cast(ptr: *anyopaque, comptime T: type) *T {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    pub fn init(res: anytype, alloc: std.mem.Allocator) Resource {
-        const ptr = alloc.create(@TypeOf(res)) catch @panic("oom");
-        ptr.* = res;
-        return Resource{
-            .ctx = ptr,
-            .deinit = (struct {
-                fn deinit(p: *anyopaque, allocator: std.mem.Allocator) void {
-                    var r = Resource.cast(p, @TypeOf(res));
-                    if (@hasDecl(@TypeOf(res), "deinit")) {
-                        r.deinit(allocator);
-                    }
-                    allocator.destroy(r);
-                }
-            }).deinit,
-        };
-    }
-};
-
-/// component/resource bit set enum
+/// type bit set enum
 fn FlagSet(comptime F: type) type {
     return enum(F) {
         const Self = @This();
@@ -1427,6 +1444,7 @@ fn FlagSet(comptime F: type) type {
     };
 }
 
+// ------------------------------------
 /// TODO: move to AppDesc
 /// 128 components & resources limit
 const FlagInt = u7;
@@ -1438,6 +1456,7 @@ pub const CompId = *CompFlag.Info;
 pub const ResFlag = FlagSet(FlagInt);
 pub const ResInfo = CompFlag.Info;
 pub const ResId = *ResFlag.Info;
+// ------------------------------------
 
 /// access flags for lock free concurrency
 pub const Access = struct {
@@ -1487,7 +1506,7 @@ pub const ArchType = struct {
         changed: u32 = 0,
     };
     /// allocate in chunks of:
-    chunk_size: usize = 64,
+    chunk_size: usize = 512,
     mask: CompFlag.Set = CompFlag.Set.initEmpty(),
     /// Archtable layout |XX = pad
     /// |ENTITY-SLICE----|XX|C1-SLICE----------|X|C2-SLICE--------- ..
@@ -1662,6 +1681,16 @@ pub const ArchType = struct {
         const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
         const flag = CompFlag.getFlag(C);
         const meta = self.getMeta(flag) orelse return EcsError.ComponentNotFound;
+        return @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
+    }
+
+    /// updates the `changed` tick
+    pub inline fn getSingleAndUpdate(self: *Self, tick: u32, entity: Entity, comptime C: type) EcsError!*C {
+        const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+        const flag = CompFlag.getFlag(C);
+        const meta = self.getMeta(flag) orelse return EcsError.ComponentNotFound;
+        const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
+        @memcpy(self.bytes[tick_offset + 4 .. tick_offset + 8], std.mem.asBytes(&tick));
         return @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
     }
 
@@ -1927,7 +1956,7 @@ pub const ArchType = struct {
 // *************************************************
 // Arch Registry
 // *************************************************
-pub const ArchRegistry = struct {
+pub const ComponentRegistry = struct {
     // _ = max_components;
     const Self = @This();
     const CHUNK_SIZE: usize = 64;
@@ -2052,6 +2081,11 @@ pub const ArchRegistry = struct {
         return self.archtypes.items[arch_id].getSingle(entity, C) catch null;
     }
 
+    pub fn getSingleAndUpdate(self: *Self, tick: u32, entity: Entity, comptime C: type) ?*C {
+        const arch_id = self.entity_lookup.get(entity) orelse return null;
+        return self.archtypes.items[arch_id].getSingleAndUpdate(tick, entity, C) catch null;
+    }
+
     pub fn getSingleOpaque(self: *Self, entity: Entity, flag: CompFlag) ?*anyopaque {
         const arch_id = self.entity_lookup.get(entity) orelse return null;
         const meta = self.archtypes.items[arch_id].getMeta(flag) orelse return null;
@@ -2079,12 +2113,15 @@ pub const ArchRegistry = struct {
             new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
         }
 
-        // TODO: deinit removed comp if it owns memory
-        // like `Children`
-
         const new_arch = &self.archtypes.items[new_arch_id.value_ptr.*];
         try self.archtypes.items[current_arch_id].moveTo(allocator, entity, new_arch);
         _ = try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
+    }
+
+    pub fn has(self: *const Self, entity: Entity, comptime C: type) bool {
+        const mask = self.mask_lookup.get(entity) orelse return false;
+        const flag = CompFlag.getFlag(C);
+        return mask.contains(flag);
     }
 
     /// TODO: deinit allocating components
@@ -2199,8 +2236,8 @@ const QueryMask = struct {
 };
 
 fn extractQuerySets(comptime query: anytype, comptime filter: anytype) QueryMask {
+    // if (!@inComptime()) @compileError("comptime only!");
     var set: QueryMask = .{};
-
     inline for (query) |comp| {
         const info = @typeInfo(comp);
         switch (info) {
@@ -2291,8 +2328,20 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
         const Self = @This();
         exclude: CompFlag.Set,
         include: CompFlag.Set,
-        reg: *ArchRegistry,
+        reg: *ComponentRegistry,
         world_tick: u32,
+
+        inline fn SelfValidate() void {
+            const query_type = @TypeOf(query);
+            if (!isTuple(query_type)) {
+                @compileError("Filter must be a tuple!");
+            }
+
+            const filter_type = @TypeOf(filter);
+            if (!isTuple(filter_type)) {
+                @compileError("Filter must be a tuple!");
+            }
+        }
 
         /// comptime query validation
         inline fn validate_query(comptime Q: type) void {
@@ -2379,14 +2428,14 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             return Self{
                 .exclude = set.exclude_set,
                 .include = set.include_set,
-                .reg = &world.archtypes,
+                .reg = &world.components,
                 .world_tick = world.world_tick,
             };
         }
 
         pub fn empty(world: *App(desc)) Self {
             return Self{
-                .reg = &world.archtypes,
+                .reg = &world.components,
                 .exclude = CompFlag.Set.initEmpty(),
                 .include = CompFlag.Set.initEmpty(),
                 .world_tick = world.world_tick,

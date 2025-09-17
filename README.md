@@ -210,7 +210,7 @@ const Gamestate = enum {
 };
 
 pub fn plugin(world: *kn.App) !void {
-    // add your sate with the default and schedules where cleanup happens
+    // add your state with the default and schedules where cleanup happens
     try app.addPlugin(kn.StatePlugin(Gamestate.loading, Schedule.cleanup));
     // States over multiple system conditions `OnEnter` `OnExit` and `InState`.
     try app.addSystemEx(Schedule.update, &my_system, OnEnter(Gamestate.menu));
