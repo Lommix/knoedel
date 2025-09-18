@@ -2414,6 +2414,20 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             return c;
         }
 
+        pub fn changed(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
+
+
+            // if (!IsWrite(C, query)){
+            //     @compileError("mutating without `Mut` marker `" ++ @typeName(C) ++ "`");
+            // }
+
+
+            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const arch = &self.reg.archtypes.items[arch_id];
+            const index = arch.entity_lookup.get(entity).?; // orelse return EcsError.EntityNotFound;
+            arch.upateChanged(self.world_tick, index, C);
+        }
+
         /// get query entry single
         pub fn getQ(self: *const Self, entity: Entity, comptime Q: type) EcsError!Q {
             comptime validate_query(Q);

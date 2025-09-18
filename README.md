@@ -231,8 +231,7 @@ pub fn my_system(
 
 ## Event Extension
 
-Event Reader and Writer, just like in bevy!
-(currently events only live for 1 frame. The reader processes events of the last frame)
+Event Reader and Writer, just like in bevy! Currently events use 2 swap buffers. Meaning your systems reads the event of the last frame.
 
 ```zig
 pub const MyEvent = struct{
@@ -256,8 +255,7 @@ pub fn send_event_system(
     });
 }
 
-// read events, each `EventReader` holds it's read state in the system locals
-// so you can have and consume the same event on multiple systems.
+// You can consume the same event on multiple systems.
 pub fn read_event_system(
     reader: kn.EventReader(MyEvent),
 ) !void{
