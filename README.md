@@ -89,7 +89,9 @@ pub fn plugin(world: *kn.App) !void {
 // A system can have unlimited args. All must implement `fromWorld(world: *kn.App)`.
 // to harden any arg for lock free concurrency, look at the `addAccess` func on `ResMut` for example.
 fn spawn_player(
-    // any mutation of the world goes through commands. Also provided `walloc` (World Allocator) and `falloc` (Frame Allocator). These are arenas with the appropriate lifetime.
+    // access the frame or world arena
+    alloc: kn.Alloc,
+    // any mutation of the world goes through commands.
     cmd: kn.Commands,
     // Mutable Resource, just like in Bevy, `Res(type)` for read access only.
     game_state: kn.ResMut(kn.State(Gamestate)),
@@ -125,7 +127,7 @@ fn spawn_player(
 
     // allocate in the current frame arena, don't bother with deallocation.
     // great for extracting and prepping render data for the current frame.
-    _ = try cmd.falloc.alloc(u8, 1000);
+    _ = try alloc.frame.alloc(u8, 1000);
 }
 ```
 
