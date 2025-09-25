@@ -400,7 +400,7 @@ pub fn App(comptime desc: AppDesc) type {
                 ent.incGen();
                 return ent;
             } else {
-                const ent = Entity.new(self.entities.count);
+                const ent = Entity.new(self.entities.count + 1); // avoid using 0 which is our .placeholder
                 self.entities.count += 1;
                 return ent;
             }

@@ -68,10 +68,11 @@ test "commands" {
     defer ecs.deinit();
 
     const cmd = ecs.getCommands();
-    _ = try cmd.spawn(.{Foo{ .n = 69 }});
+    const entity = try cmd.spawn(.{Foo{ .n = 69 }});
 
     ecs.update();
     try expect(ecs.entities.count == 1);
+    try expect(entity.id() == 1);
 
     const q = try App(.{}).Query(.{Foo}).fromWorld(&ecs);
     var view = q.iterQ(struct { entity: Entity, foo: *const Foo });
