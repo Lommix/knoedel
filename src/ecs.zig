@@ -40,10 +40,12 @@ pub const Memtator = struct {
 
     /// requires pinned postion on memory.
     pub fn init(self: *Self, allocator: std.mem.Allocator, frame_mem: usize) !void {
-        self.parent = allocator;
+        self.world_mutex = .{};
+        self.world_mem_size = 0;
         self.frame_sector = try allocator.alloc(u8, frame_mem);
         self.world_arena = std.heap.ArenaAllocator.init(allocator);
         self.frame_alloc = std.heap.FixedBufferAllocator.init(self.frame_sector);
+        self.parent = allocator;
     }
 
     pub fn refreshVTable(self: *Self, gpa: std.mem.Allocator) void {
@@ -75,7 +77,6 @@ pub const Memtator = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.world_mutex.lock();
         defer self.world_mutex.unlock();
-
         self.world_mem_size +|= len;
         return self.world_arena.allocator().rawAlloc(len, alignment, ra);
     }
@@ -84,7 +85,7 @@ pub const Memtator = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.world_mutex.lock();
         defer self.world_mutex.unlock();
-        // self.world_mem_size += new_len - buf.len;
+        self.world_mem_size += new_len - buf.len;
         return self.world_arena.allocator().rawResize(buf, alignment, new_len, ret_addr);
     }
 
@@ -92,7 +93,6 @@ pub const Memtator = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.world_mutex.lock();
         defer self.world_mutex.unlock();
-
         return self.world_arena.allocator().rawRemap(memory, alignment, new_len, ret_addr);
     }
 
@@ -100,7 +100,6 @@ pub const Memtator = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.world_mutex.lock();
         defer self.world_mutex.unlock();
-
         self.world_mem_size -|= buf.len;
         return self.world_arena.allocator().rawFree(buf, alignment, ret_addr);
     }
@@ -2416,11 +2415,9 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
 
         pub fn changed(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
 
-
             // if (!IsWrite(C, query)){
             //     @compileError("mutating without `Mut` marker `" ++ @typeName(C) ++ "`");
             // }
-
 
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
             const arch = &self.reg.archtypes.items[arch_id];
