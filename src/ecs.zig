@@ -39,13 +39,16 @@ pub const Memtator = struct {
     parent: std.mem.Allocator,
 
     /// requires pinned postion on memory.
-    pub fn init(self: *Self, allocator: std.mem.Allocator, frame_mem: usize) !void {
-        self.world_mutex = .{};
-        self.world_mem_size = 0;
-        self.frame_sector = try allocator.alloc(u8, frame_mem);
-        self.world_arena = std.heap.ArenaAllocator.init(allocator);
-        self.frame_alloc = std.heap.FixedBufferAllocator.init(self.frame_sector);
-        self.parent = allocator;
+    pub fn init(allocator: std.mem.Allocator, frame_mem: usize) !Memtator {
+        const frame_sector = try allocator.alloc(u8, frame_mem);
+        return .{
+            .world_mutex = .{},
+            .world_mem_size = 0,
+            .frame_sector = frame_sector,
+            .world_arena = std.heap.ArenaAllocator.init(allocator),
+            .frame_alloc = std.heap.FixedBufferAllocator.init(frame_sector),
+            .parent = allocator,
+        };
     }
 
     pub fn refreshVTable(self: *Self, gpa: std.mem.Allocator) void {
@@ -216,16 +219,19 @@ pub fn App(comptime desc: AppDesc) type {
         world_tick: u32 = 0,
         // ---------------------------------------
 
-        pub fn init(self: *World, gpa: std.mem.Allocator) EcsError!void {
-            self.systems = .{};
-            self.commands = .{};
-            self.entities = .{};
-            self.resources = .{};
-            self.components = .{};
-            self.hooks = .{};
-            self.world_tick = 0;
-            try self.memtator.init(gpa, desc.max_frame_mem);
-            try self.systems.init(self.memtator.world());
+        pub fn init(gpa: std.mem.Allocator) EcsError!*World {
+            var self = try gpa.create(World);
+
+            const memtator = try Memtator.init(gpa, desc.max_frame_mem);
+            const systems = try SystemRegistry.init(self.memtator.world());
+
+            self.* = .{
+                .memtator = memtator,
+                .systems = systems,
+            };
+            try self.systems.startExecutor();
+
+            return self;
         }
 
         const EntityRegistry = struct {
@@ -241,6 +247,7 @@ pub fn App(comptime desc: AppDesc) type {
         /// end?
         pub fn deinit(self: *World) void {
             self.memtator.deinit();
+            self.memtator.parent.destroy(self);
         }
 
         /// modify the world and a thread safe way
@@ -452,8 +459,13 @@ pub fn App(comptime desc: AppDesc) type {
             schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .{},
             // --------------------------
 
-            pub fn init(self: *Self, gpa: std.mem.Allocator) !void {
-                self.executor = BatchExecutor.init(gpa);
+            pub fn init(gpa: std.mem.Allocator) !Self {
+                return .{
+                    .executor = BatchExecutor.init(gpa),
+                };
+            }
+
+            pub fn startExecutor(self: *Self) !void {
                 try self.executor.start();
             }
 

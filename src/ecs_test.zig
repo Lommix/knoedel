@@ -15,8 +15,7 @@ test "ecs" {
     const Baz = struct { n: i32 };
 
     const app = App(.{});
-    var ecs: app = undefined;
-    try ecs.init(std.testing.allocator);
+    var ecs = try app.init(std.testing.allocator);
     defer ecs.deinit();
 
     const alloc = ecs.memtator.world();
@@ -33,7 +32,7 @@ test "ecs" {
     try ecs.components.remove(alloc, ent2, Bar);
     try ecs.components.remove(alloc, ent2, Foo);
 
-    const q1 = try app.Query(.{Foo}).fromWorld(&ecs);
+    const q1 = try app.Query(.{Foo}).fromWorld(ecs);
     var viewIter = q1.iterQ(struct { entity: Entity, foo: *const Foo });
     var count: u32 = 0;
 
@@ -49,7 +48,7 @@ test "ecs" {
 
     ecs.update();
 
-    const q2 = try app.Query(.{ Baz, Foo }).fromWorld(&ecs);
+    const q2 = try app.Query(.{ Baz, Foo }).fromWorld(ecs);
     var bazIter = q2.iterQ(struct { b: *const Baz, f: *const Foo });
     count = 0;
     while (bazIter.next()) |en| {
@@ -63,8 +62,8 @@ test "ecs" {
 test "commands" {
     const Foo = struct { n: i32 };
 
-    var ecs: App(.{}) = undefined;
-    try ecs.init(std.testing.allocator);
+    const app = App(.{});
+    var ecs = try app.init(std.testing.allocator);
     defer ecs.deinit();
 
     const cmd = ecs.getCommands();
@@ -73,7 +72,7 @@ test "commands" {
     ecs.update();
     try expect(ecs.entities.count == 1);
 
-    const q = try App(.{}).Query(.{Foo}).fromWorld(&ecs);
+    const q = try App(.{}).Query(.{Foo}).fromWorld(ecs);
     var view = q.iterQ(struct { entity: Entity, foo: *const Foo });
 
     var count: u32 = 0;
@@ -92,8 +91,7 @@ test "system" {
     const Liz = struct { i: u32 = 0 };
 
     const a = App(.{});
-    var world: App(.{}) = undefined;
-    try world.init(std.testing.allocator);
+    var world = try a.init(std.testing.allocator);
     defer world.deinit();
 
     // -------------
@@ -162,7 +160,7 @@ test "system" {
     try world.addSystem(Schedule.update, &sys2);
 
     for (0..10) |_| {
-        try world.systems.runPar(Schedule.update, &world);
+        try world.systems.runPar(Schedule.update, world);
         world.update();
     }
 
@@ -170,8 +168,8 @@ test "system" {
 }
 
 test "local" {
-    var world: App(.{}) = undefined;
-    try world.init(std.testing.allocator);
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator);
     defer world.deinit();
 }
 
@@ -184,8 +182,8 @@ test "test_resource" {
 
     const res = TestRes{ .a = 69 };
 
-    var world: App(.{}) = undefined;
-    try world.init(std.testing.allocator);
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator);
     defer world.deinit();
 
     try world.addResource(res);
@@ -201,8 +199,7 @@ test "children_despawn" {
     const Biz = struct { c: u32 = 2 };
 
     const app = App(.{});
-    var world: app = undefined;
-    try world.init(std.testing.allocator);
+    var world = try app.init(std.testing.allocator);
     defer world.deinit();
     const gpa = world.memtator.world();
 
@@ -233,7 +230,7 @@ test "children_despawn" {
 
     world.update();
 
-    const q = try app.Query(.{Foo}).fromWorld(&world);
+    const q = try app.Query(.{Foo}).fromWorld(world);
     var it = q.iterQ(struct { foo: *const Foo });
     while (it.next()) |en| {
         std.debug.print("THIS SHOULD NOT HAPPEN {any}\n", .{en});
