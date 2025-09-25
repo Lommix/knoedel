@@ -3,7 +3,6 @@ const e = @import("ecs.zig");
 
 const expect = std.testing.expect;
 const Entity = e.Entity;
-const ArchRegistry = e.ArchRegistry;
 const ArchType = e.ArchType;
 const App = e.App;
 const EcsError = e.EcsError;
@@ -25,14 +24,14 @@ test "ecs" {
     const ent1 = ecs.nextEntityId();
     const ent2 = ecs.nextEntityId();
 
-    try ecs.archtypes.add(alloc, 0, ent1, Foo{ .n = 1 });
-    try ecs.archtypes.add(alloc, 0, ent1, Baz{ .n = 11 });
-    try ecs.archtypes.add(alloc, 0, ent1, Bar{ .n = 22 });
-    try ecs.archtypes.add(alloc, 0, ent2, Foo{ .n = 2 });
-    try ecs.archtypes.add(alloc, 0, ent2, Bar{ .n = 22 });
+    try ecs.components.add(alloc, 0, ent1, Foo{ .n = 1 });
+    try ecs.components.add(alloc, 0, ent1, Baz{ .n = 11 });
+    try ecs.components.add(alloc, 0, ent1, Bar{ .n = 22 });
+    try ecs.components.add(alloc, 0, ent2, Foo{ .n = 2 });
+    try ecs.components.add(alloc, 0, ent2, Bar{ .n = 22 });
 
-    try ecs.archtypes.remove(alloc, ent2, Bar);
-    try ecs.archtypes.remove(alloc, ent2, Foo);
+    try ecs.components.remove(alloc, ent2, Bar);
+    try ecs.components.remove(alloc, ent2, Foo);
 
     const q1 = try app.Query(.{Foo}).fromWorld(&ecs);
     var viewIter = q1.iterQ(struct { entity: Entity, foo: *const Foo });
