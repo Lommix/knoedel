@@ -228,11 +228,6 @@ pub fn App(comptime desc: AppDesc) type {
             try self.systems.init(self.memtator.world());
         }
 
-        const EntityRegistry = struct {
-            unused: std.ArrayList(Entity) = .{},
-            count: u32 = 0,
-        };
-
         ///! valid check
         pub fn isValid(self: *const World, ent: Entity) bool {
             return self.components.entity_lookup.contains(ent);
