@@ -40,10 +40,8 @@ const Schedule = enum{
     cleanup,
 };
 
-pub fn main()!void{
-
-    var app : kn.App = undefined;
-    try app.init(std.heap.c_allocator);
+pub fn main() !void{
+    var app = try kn.App.init(std.c_allocator);
     defer app.deinit();
 
     // add your plugins
@@ -53,7 +51,7 @@ pub fn main()!void{
     // run the init schedule once
     try app.run(Schedule.init, true); // <-- `true`: consume command buffer after schedule
 
-    while(true){
+    while (true) {
         app.runPar(Schedule.pre_update, true);
         app.runPar(Schedule.update, true);
         app.runPar(Schedule.post_update, true);
@@ -86,6 +84,13 @@ pub fn plugin(world: *kn.App) !void {
     try world.addSystem(Schedule.update, kn.Chain(.{&prepare, &aim, &move}));
 }
 
+// declare a resource and add it to the world
+const MyRes = struct {
+    value: usize = 0,
+};
+
+try app.addResource(MyRes{});
+
 // A system can have unlimited args. All must implement `fromWorld(world: *kn.App)`.
 // to harden any arg for lock free concurrency, look at the `addAccess` func on `ResMut` for example.
 fn spawn_player(
@@ -98,7 +103,7 @@ fn spawn_player(
     // Queries can have multiple filters. `With(type)`, `WithOut(type)`, `Added(type)` and `Changed(type)` provided by core
     query: QueryFiltered(.{kn.Mut(Enemy), SomeComp}, .{kn.Added(Idle)}),
     // system local resources.
-    counter: kn.Local(usize),
+    counter: kn.Local(MyRes),
     // event writer and reader, just like in Bevy
 ) !void{
     // spawn player
@@ -113,11 +118,11 @@ fn spawn_player(
     });
 
     // mutate some system local state.
-    counter.inner += 1;
+    counter.inner.value += 1;
 
     // add player as target for all enemies
     var it = query.iterQ(struct {entity: kn.Entity, enemy: *Enemy, somecomp: *const SomeComp});
-    while(it.next()) |entry|{
+    while(it.next()) |entry| {
         entry.enemy.target = player_entity;
         std.debug.print("updated entity {d}\n", .{entry.entity.id()});
     }
