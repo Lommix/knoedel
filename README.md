@@ -4,9 +4,9 @@
 
 Single file data oriented application framework written in Zig.
 
-Heavily inspired by my favorite rust ECS `Bevy`.
+Heavily inspired by the rust ECS `Bevy`. (Very similar API)
 
-Works great with any backend. Raylib, Sokol or your own
+Works great with any backend. Raylib, Sokol, SDL or your own
 
 **zig version: 0.15.1**
 
@@ -19,6 +19,7 @@ Works great with any backend. Raylib, Sokol or your own
 - Event and state extensions.
 - Archtype based storage.
 - Single file. Easy to copy, modify and own.
+- No hidden control flow, full manual control.
 
 Example:
 
@@ -205,6 +206,11 @@ fn my_system(
 }
 ```
 
+# Extensions
+
+Following the provided plugin API you can build any Extension. Just like in Bevy, most features can be build with the plugin system.
+The `State` and `Event` Extension act as an example and are separated from the core in under ~100 lines.
+
 ## State Extension
 
 State management with system conditions
@@ -317,7 +323,16 @@ fn body_add_hook(comp: *Body, _: kn.Entity, world: *kn.App) !void {
 
 ```
 
-## Contribution
+## Build step
 
-Currently do not accept pull request, but I am open to bug reports and improvements as issues.
-This is the core of a game I've been working on. Many changes ahead.
+Use your preferred way (clone/copy/fetch)
+
+```
+zig fetch --save git+https://github.com/Lommix/knoedel
+```
+
+```zig
+const knoedel_dep = b.dependency("knoedel", .{});
+//..
+your_game.root_module.addImport("knoedel", knoedel_dep.knoedel.module("knoedel"));
+```
