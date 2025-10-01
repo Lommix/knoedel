@@ -1081,13 +1081,13 @@ pub fn App(comptime desc: AppDesc) type {
             arg_ptr.child = child;
 
             return Command{
-                .ptr = undefined,
+                .ptr = arg_ptr,
                 .run = (struct {
                     fn run(ctx: *anyopaque, world: *World) EcsError!void {
                         const gpa = world.memtator.world();
                         const args: *Args = @ptrCast(@alignCast(ctx));
 
-                        if (world.components.getSingleAndUpdate(args.parent, Children)) |c| {
+                        if (world.components.getSingleAndUpdate(world.world_tick, args.parent, Children)) |c| {
                             try c.items.append(gpa, args.child);
                         } else {
                             var c = Children{};
