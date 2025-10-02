@@ -258,17 +258,13 @@ pub fn App(comptime desc: AppDesc) type {
         /// run a system schedule in lock free parallel
         pub fn runPar(self: *World, schedule: anytype, flush_commands_after: bool) void {
             self.systems.runPar(schedule, self) catch return;
-            if (flush_commands_after) {
-                self.flushCommands() catch |err| std.debug.print("{any}\n", .{err});
-            }
+            if (flush_commands_after) self.flushCommands();
         }
 
         /// run a system schedule in 'order' (depending on order added)
         pub fn run(self: *World, schedule: anytype, flush_commands_after: bool) void {
             self.systems.run(schedule, self) catch return;
-            if (flush_commands_after) {
-                self.flushCommands() catch |err| std.debug.print("{any}\n", .{err});
-            }
+            if (flush_commands_after) self.flushCommands();
         }
 
         /// insert a resource
@@ -331,18 +327,15 @@ pub fn App(comptime desc: AppDesc) type {
         /// update tick
         /// runs all remainig commands and resets the frame arena
         pub fn update(self: *World) void {
-            self.flushCommands() catch |err| {
-                std.log.err("command failure with `{any}`", .{err});
-            };
-
+            self.flushCommands();
             _ = self.memtator.resetFrame();
             self.world_tick = self.world_tick +% 1;
         }
 
         /// flush the command queue
         /// not thread safe. Should be called between scheduels
-        pub fn flushCommands(self: *World) EcsError!void {
-            try self.commands.runAllUnsafe(self);
+        pub fn flushCommands(self: *World) void {
+            self.commands.runAllUnsafe(self);
         }
 
         fn despawn_with_children(self: *World, ent: Entity) EcsError!void {
@@ -852,7 +845,7 @@ pub fn App(comptime desc: AppDesc) type {
                 const start = std.time.nanoTimestamp();
 
                 sys.run(sys.ptr, world, &sys.locals, sys.last_run_tick) catch |err| {
-                    std.debug.print("system failed with: `{any}` @`{s}`\n", .{ err, sys.debug });
+                    std.log.scoped(.knoedel).warn("system failed with: `{any}` @`{s}`", .{ err, sys.debug });
                 };
 
                 const total = std.time.nanoTimestamp() - start;
@@ -1050,9 +1043,11 @@ pub fn App(comptime desc: AppDesc) type {
                 try self.queue.append(allocator, cmd);
             }
 
-            pub fn runAllUnsafe(self: *Self, world: *World) !void {
+            pub fn runAllUnsafe(self: *Self, world: *World) void {
                 for (self.queue.items) |cmd| {
-                    try cmd.run(cmd.ptr, world);
+                    cmd.run(cmd.ptr, world) catch |err| {
+                        std.log.scoped(.knoedel).warn("Command failed to run with `{any}`", .{err});
+                    };
                 }
 
                 self.queue = .{};
