@@ -31,6 +31,9 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const ConditionFn = App.SystemRegistry.ConditionFn;
         pub const SystemFn = App.SystemRegistry.SystemFn;
         pub const Error = ecs.EcsError;
+        pub const Access = ecs.Access;
+        pub const ResFlag = ecs.ResFlag;
+        pub const CompFlag = ecs.CompFlag;
 
         // Event Extension
         const e = ev.EventExtension(cfg);
