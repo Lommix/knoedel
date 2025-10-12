@@ -323,6 +323,18 @@ fn body_add_hook(comp: *Body, _: kn.Entity, world: *kn.App) !void {
 
 ```
 
+## Required Components
+
+`Required` is a tuple with components (and defaults) that will be attached to the entity, if not present.
+
+```zig
+pub const Sprite = struct{
+    pub const Required = .{Transform{}, Visbility{}};
+
+    //...
+};
+```
+
 ## Build step
 
 Use your preferred way (clone/copy/fetch)
