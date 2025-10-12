@@ -267,6 +267,27 @@ pub fn App(comptime desc: AppDesc) type {
             if (flush_commands_after) self.flushCommands();
         }
 
+        /// run any system right now, pass any *const fn ptr.
+        /// does not allow for `local access`
+        pub fn runInstant(self: *World, system_fn: anytype) !void {
+            const FnType = @typeInfo(@TypeOf(system_fn)).pointer.child;
+            const info = @typeInfo(FnType);
+
+            var sys_args: SystemRegistry.genArgType(info.@"fn".params) = undefined;
+
+            inline for (info.@"fn".params, 0..) |*p, i| {
+                const Ty = p.type.?;
+                if (@hasDecl(Ty, "fromWorld")) {
+                    var ret = try Ty.fromWorld(self);
+                    if (@hasDecl(Ty, "setWorldTick")) ret.setWorldTick(self.world_tick);
+                    @field(sys_args, cprint("{d}", .{i})) = ret;
+                    continue;
+                }
+            }
+
+            try @call(.auto, system_fn, sys_args);
+        }
+
         /// insert a resource
         pub fn addResource(self: *World, res: anytype) !void {
             try self.resources.register(self.memtator.world(), res);
@@ -1044,12 +1065,15 @@ pub fn App(comptime desc: AppDesc) type {
             }
 
             pub fn runAllUnsafe(self: *Self, world: *World) void {
-                for (self.queue.items) |cmd| {
+                var i: usize = 0;
+                while (i < self.queue.items.len) {
+                    const cmd = self.queue.items[i];
                     cmd.run(cmd.ptr, world) catch |err| {
                         std.log.scoped(.knoedel).warn("Command failed to run with `{any}`", .{err});
                     };
-                }
 
+                    i += 1;
+                }
                 self.queue = .{};
             }
         };
@@ -1175,7 +1199,8 @@ pub fn App(comptime desc: AppDesc) type {
                             switch (@typeInfo(@TypeOf(bundle))) {
                                 .@"struct" => {},
                                 .@"enum" => {},
-                                else => @compileError("component in insert must be of type struct, `" ++ @typeName(@TypeOf(bundle)) ++ "` given"),
+                                .@"union" => {},
+                                else => @compileError("component in insert must be of type struct/enum/union, `" ++ @typeName(@TypeOf(bundle)) ++ "` given"),
                             }
 
                             const flag = CompFlag.getFlag(@TypeOf(bundle));
@@ -1190,7 +1215,8 @@ pub fn App(comptime desc: AppDesc) type {
                             switch (@typeInfo(CompType)) {
                                 .@"struct" => {},
                                 .@"enum" => {},
-                                else => @compileError("component in bundle must be of type struct, `" ++ @typeName(CompType) ++ "` given"),
+                                .@"union" => {},
+                                else => @compileError("component in bundle must be of type struct/enum/union, `" ++ @typeName(CompType) ++ "` given"),
                             }
 
                             // ---------------------
@@ -1210,10 +1236,29 @@ pub fn App(comptime desc: AppDesc) type {
 
                                 try world.components.add(world.memtator.world(), world.world_tick, child_ent, Parent{ .entity = args.ent });
                             } else {
+
+                                // hooks
                                 const info = @typeInfo(ArgType);
                                 if (!info.@"struct".fields[i].is_comptime) {
                                     const flag = CompFlag.getFlag(CompType);
                                     try world.hooks.runAddedHook(flag, &args.bundle[i], args.ent, world);
+                                }
+
+                                // required comps
+                                if (@hasDecl(CompType, "Required")) {
+                                    inline for (CompType.Required) |req| {
+                                        const ReqType = @TypeOf(req);
+                                        const ReqInfo = @typeInfo(ReqType);
+
+                                        switch (ReqInfo) {
+                                            .@"struct" => {},
+                                            .@"enum" => {},
+                                            .@"union" => {},
+                                            else => |ty| @compileError("Required Component must be struct or enum, found " ++ @tagName(ty)),
+                                        }
+                                    }
+
+                                    try world.components.addBundle(world.memtator.world(), world.world_tick, args.ent, CompType.Required);
                                 }
                             }
                             // ---------------------
@@ -1225,9 +1270,11 @@ pub fn App(comptime desc: AppDesc) type {
             };
         }
 
-        const Command = struct {
+        pub const CommandFn = *const fn (ctx: *anyopaque, world: *World) EcsError!void;
+
+        pub const Command = struct {
             ptr: *anyopaque,
-            run: *const fn (ctx: *anyopaque, world: *World) EcsError!void,
+            run: CommandFn,
         };
 
         pub fn Query(query: anytype) type {
@@ -1251,6 +1298,13 @@ pub fn Local(comptime T: type) type {
 pub fn Mut(comptime T: type) type {
     return struct {
         const _is_mut: bool = true;
+        const inner = T;
+    };
+}
+
+pub fn Has(comptime T: type) type {
+    return struct {
+        const _is_has: bool = true;
         const inner = T;
     };
 }
@@ -2218,6 +2272,12 @@ pub fn Qiter(max_components: comptime_int, comptime Q: type, comptime filter: an
             }
         }
 
+        pub fn reset(self: *Self) void {
+            self.arch_iter.reset();
+            self.current = null;
+            self.offset = 0;
+        }
+
         /// mark a component of the current iteration as changed.
         /// should only be called inside a iteration loop.
         pub fn changed(self: *Self, comptime C: type) void {
@@ -2267,6 +2327,12 @@ fn extractQuerySets(comptime query: anytype, comptime filter: anytype) QueryMask
                 }
             },
             .@"enum" => {
+                const comp_id = CompFlag.getFlag(comp);
+                set.include_set.insert(comp_id);
+                set.read_set.insert(comp_id);
+            },
+
+            .@"union" => {
                 const comp_id = CompFlag.getFlag(comp);
                 set.include_set.insert(comp_id);
                 set.read_set.insert(comp_id);
