@@ -948,7 +948,7 @@ pub fn App(comptime desc: AppDesc) type {
             const Self = @This();
             executor: *BatchExecutor,
 
-            fn fromWorld(world: *World) EcsError!Self {
+            pub fn fromWorld(world: *World) EcsError!Self {
                 return Jobs{
                     .executor = &world.systems.executor,
                 };
@@ -966,7 +966,7 @@ pub fn App(comptime desc: AppDesc) type {
             frame: std.mem.Allocator,
             world: std.mem.Allocator,
 
-            fn fromWorld(world: *World) EcsError!Alloc {
+            pub fn fromWorld(world: *World) EcsError!Alloc {
                 return .{
                     .frame = world.memtator.frame(),
                     .world = world.memtator.world(),
