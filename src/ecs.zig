@@ -1439,12 +1439,69 @@ pub const ResourceRegistry = struct {
     }
 };
 
+fn HeapFlagSet(comptime F: type) type {
+    return struct {
+        registered_buf: [max]*Info = undefined,
+        registered_len: usize = 0,
+
+        const Self = @This();
+        pub const max = std.math.maxInt(FlagInt);
+        pub const FlagEnum = enum(F) { _ };
+        pub const Set = std.enums.EnumSet(FlagSet);
+        pub const Info = struct {
+            name: []const u8,
+            hash: u32,
+            size: usize,
+            alignment: usize,
+            flag: ?CompFlag = null,
+            pub inline fn init(comptime T: type) *Self.Info {
+                return &struct {
+                    var info: Self.Info = .{
+                        .name = @typeName(T),
+                        .hash = hashType(T),
+                        .size = @sizeOf(T),
+                        .alignment = @alignOf(T),
+                    };
+                }.info;
+            }
+        };
+
+        pub inline fn getFlag(self: *Self, comptime T: type) FlagEnum {
+            const typeId = Info.init(T);
+            return self.register(typeId);
+        }
+        pub fn register(self: *Self, id: *Info) FlagEnum {
+            if (id.flag) |f| {
+                @branchHint(.likely);
+                return f;
+            }
+
+            if (self.registered_len >= max) {
+                @panic("set type overflow, increase component count");
+            }
+
+            const flag: FlagEnum = @enumFromInt(self.registered_len);
+            id.flag = flag;
+
+            self.registered_buf[self.registered_len] = id;
+            _ = @atomicRmw(@TypeOf(self.registered_len), &self.registered_len, .Add, 1, .release);
+
+            return flag;
+        }
+
+        pub fn getId(self: FlagEnum) *Info {
+            assert(@intFromEnum(self) < self.registered_len);
+            return self.registered_buf[@intFromEnum(self)];
+        }
+    };
+}
+
 /// type bit set enum
 fn FlagSet(comptime F: type) type {
     return enum(F) {
         const Self = @This();
         pub const max = std.math.maxInt(FlagInt);
-        pub const Set = std.enums.EnumSet(CompFlag);
+        pub const Set = std.enums.EnumSet(Self);
         pub const Info = struct {
             name: []const u8,
             hash: u32,
@@ -2289,6 +2346,56 @@ pub fn Qiter(max_components: comptime_int, comptime Q: type, comptime filter: an
     };
 }
 
+//---------------------------------------
+pub fn Citer(comptime C: type, comptime mut: bool, filter: anytype) type {
+    return struct {
+        const Self = @This();
+        const Query = struct { c: if (mut) *C else *const C };
+        arch_iter: ArchIter,
+        current: ?*ArchType = null,
+        offset: usize = 0,
+        world_tick: u32,
+
+        pub fn next(self: *Self) if (mut) ?*C else ?*const C {
+            while (true) {
+                if (self.current) |current_arch| {
+                    if (self.offset >= current_arch.len) {
+                        self.current = null;
+                        self.offset = 0;
+                        continue;
+                    }
+
+                    const next_item = current_arch.getFilteredIndex(self.world_tick, self.offset, Query, filter) catch {
+                        self.offset += 1;
+                        continue;
+                    };
+
+                    self.offset += 1;
+                    return next_item.c;
+                }
+
+                self.current = self.arch_iter.next() orelse return null;
+                self.offset = 0;
+            }
+        }
+
+        pub fn reset(self: *Self) void {
+            self.arch_iter.reset();
+            self.current = null;
+            self.offset = 0;
+        }
+
+        /// mark a component of the current iteration as changed.
+        /// should only be called inside a iteration loop.
+        pub fn changed(self: *Self, comptime T: type) void {
+            assert(self.offset > 0);
+            assert(self.current != null);
+            const index = self.offset - 1; // current iteration
+            self.current.?.upateChanged(self.world_tick, index, T);
+        }
+    };
+}
+
 const QueryMask = struct {
     read_set: CompFlag.Set = .{},
     write_set: CompFlag.Set = .{},
@@ -2443,7 +2550,8 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             access.comp_write = access.comp_write.unionWith(set.write_set);
         }
 
-        /// query iterate
+        /// query iterate, expects a struct of component references
+        /// Example: `var itr = query.iterQ(struct{entity: kn.Entity, my_comp: *const MyComp});`
         pub fn iterQ(self: *const Self, comptime Q: type) Qiter(desc.max_components, Q, filter) {
             comptime validate_query(Q);
             return Qiter(desc.max_components, Q, filter){
@@ -2456,6 +2564,63 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             };
         }
 
+        /// single mut component iterator over query.
+        /// Example: `var itr = query.iterC(Transform);`
+        pub fn iterC(self: *const Self, comptime C: type) Citer(C, true, filter) {
+            comptime validate_query(struct { c: *C });
+            return Citer(C, true, filter){
+                .world_tick = self.world_tick,
+                .arch_iter = ArchIter{
+                    .include = self.include,
+                    .exclude = self.exclude,
+                    .reg = self.reg.archtypes.items,
+                },
+            };
+        }
+
+        /// single const component iterator over query.
+        /// Example: `var itr = query.iterConstC(Transform);`
+        pub fn iterConstC(self: *const Self, comptime C: type) Citer(C, false, filter) {
+            comptime validate_query(struct { c: *const C });
+            return Citer(C, false, filter){
+                .world_tick = self.world_tick,
+                .arch_iter = ArchIter{
+                    .include = self.include,
+                    .exclude = self.exclude,
+                    .reg = self.reg.archtypes.items,
+                },
+            };
+        }
+
+        /// returns the first entry
+        /// Example: `const entry = query.firstQ(struct{entity: kn.Entity, my_comp: *const MyComp}).?;`
+        pub fn firstQ(self: *const Self, comptime Q: type) ?Q {
+            comptime validate_query(Q);
+            var it = self.iterQ(Q);
+            return it.next();
+        }
+
+        /// returns a component ptr of the first entry
+        /// Example: `const transform: *Transform = query.firstC(Transform).?;`
+        pub fn firstC(self: *const Self, comptime C: type) ?*C {
+            if (isTuple(C)) @compileError("`firstC` only takes a single component type, not tuples");
+            const Query = struct { c: *C };
+            comptime validate_query(Query);
+            const en = self.firstQ(Query) orelse return null;
+            return en.c;
+        }
+
+        /// returns a const component ptr of the first entry
+        /// Example: `const transform: *const Transform = query.firstC(Transform).?;`
+        pub fn firstConstC(self: *const Self, comptime C: type) ?*const C {
+            if (isTuple(C)) @compileError("`firstConstC` only takes a single component type, not tuples");
+            const Query = struct { c: *const C };
+            comptime validate_query(Query);
+            const en = self.firstQ(Query) orelse return null;
+            return en.c;
+        }
+
+        /// iterator over the entites
         pub fn iterEntity(self: *const Self) EntityIter {
             return EntityIter{
                 .arch_iter = ArchIter{
@@ -2466,6 +2631,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             };
         }
 
+        /// totoal entity count for query
         pub fn count(self: *const Self) usize {
             var iter = ArchIter{
                 .include = self.include,
@@ -2474,19 +2640,13 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             };
 
             var c: usize = 0;
-            while (iter.next()) |arch| {
-                c += arch.len;
-            }
-
+            while (iter.next()) |arch| c += arch.len;
             return c;
         }
 
+        /// marks a component as `changed`
+        /// triggers query filter `Changed(comptime C:type)`
         pub fn changed(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
-
-            // if (!IsWrite(C, query)){
-            //     @compileError("mutating without `Mut` marker `" ++ @typeName(C) ++ "`");
-            // }
-
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
             const arch = &self.reg.archtypes.items[arch_id];
             const index = arch.entity_lookup.get(entity).?; // orelse return EcsError.EntityNotFound;
@@ -2512,6 +2672,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             };
         }
 
+        /// empty placeholder query
         pub fn empty(world: *App(desc)) Self {
             return Self{
                 .reg = &world.components,
