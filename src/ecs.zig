@@ -2658,8 +2658,30 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             comptime validate_query(Q);
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
             const arch = &self.reg.archtypes.items[arch_id];
-            const index = arch.entity_lookup.get(entity).?; // orelse return EcsError.EntityNotFound;
+            const index = arch.entity_lookup.get(entity).?;
             return arch.getFilteredIndex(self.world_tick, index, Q, filter);
+        }
+
+        /// get component entry single
+        pub fn getC(self: *const Self, entity: Entity, comptime C: type) EcsError!*C {
+            const Query = struct { c: *C };
+            comptime validate_query(Query);
+            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const arch = &self.reg.archtypes.items[arch_id];
+            const index = arch.entity_lookup.get(entity).?;
+            const entry = try arch.getFilteredIndex(self.world_tick, index, Query, filter);
+            return entry.c;
+        }
+
+        /// get component entry single
+        pub fn getConstC(self: *const Self, entity: Entity, comptime C: type) EcsError!*const C {
+            const Query = struct { c: *const C };
+            comptime validate_query(Query);
+            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const arch = &self.reg.archtypes.items[arch_id];
+            const index = arch.entity_lookup.get(entity).?;
+            const entry = try arch.getFilteredIndex(self.world_tick, index, Query, filter);
+            return entry.c;
         }
 
         pub fn fromWorld(world: *App(desc)) EcsError!Self {
