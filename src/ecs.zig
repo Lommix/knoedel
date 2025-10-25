@@ -201,16 +201,12 @@ pub const Children = struct {
 /// Needs to have a fixed position in memory and called init on.
 pub fn App(comptime desc: AppDesc) type {
     return struct {
-        // TODO: finally finish the naming refactoring
-        const World = @This();
-        //-------------------------
         memtator: Memtator,
         entities: struct {
             entity_mutex: std.Thread.Mutex = .{},
             unused: std.ArrayList(Entity) = .{},
             count: u32 = 0,
         } = .{},
-        // ---------------------------------------
         components: ComponentRegistry = .{},
         resources: ResourceRegistry = .{},
         systems: SystemRegistry = .{},
@@ -218,6 +214,7 @@ pub fn App(comptime desc: AppDesc) type {
         hooks: HookRegistry(desc) = .{},
         world_tick: u32 = 0,
         // ---------------------------------------
+        const World = @This();
 
         pub fn init(gpa: std.mem.Allocator) EcsError!*World {
             var self = try gpa.create(World);
@@ -432,6 +429,11 @@ pub fn App(comptime desc: AppDesc) type {
 
         /// main system scheduler
         pub const SystemRegistry = struct {
+            executor: BatchExecutor = undefined,
+            systems: std.ArrayList(OpaqueSystem) = .{},
+            system_ptr_lookup: std.AutoHashMapUnmanaged(usize, SystemID) = .{},
+            schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .{},
+            // --------------------------
             const Self = @This();
             const LocalRegistry = ResourceRegistry;
             pub const ConditionFn = *const fn (*World, *LocalRegistry) EcsError!bool;
@@ -459,14 +461,6 @@ pub fn App(comptime desc: AppDesc) type {
                 batch_count: usize = 0,
                 run_time_ns: i128 = 0,
             };
-
-            // --------------------------
-            executor: BatchExecutor = undefined,
-            // pool: std.Thread.Pool = undefined,
-            systems: std.ArrayList(OpaqueSystem) = .{},
-            system_ptr_lookup: std.AutoHashMapUnmanaged(usize, SystemID) = .{},
-            schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .{},
-            // --------------------------
 
             pub fn init(gpa: std.mem.Allocator) !Self {
                 return .{
@@ -914,6 +908,10 @@ pub fn App(comptime desc: AppDesc) type {
                     return self;
                 }
 
+                pub inline fn get(self: *Self) *const R {
+                    return self.inner;
+                }
+
                 pub fn addAccess(access: *Access) void {
                     const flag = ResFlag.getFlag(R);
                     access.res_read_write.insert(flag);
@@ -931,6 +929,10 @@ pub fn App(comptime desc: AppDesc) type {
                     var self = Self{};
                     self.inner = try world.resource(R);
                     return self;
+                }
+
+                pub inline fn get(self: *Self) *R {
+                    return self.inner;
                 }
 
                 pub fn addAccess(access: *Access) void {
@@ -1289,9 +1291,15 @@ pub fn App(comptime desc: AppDesc) type {
 
 pub fn Local(comptime T: type) type {
     return struct {
+        inner: *T = undefined,
+
+        const Self = @This();
         const is_local_marker: bool = true;
         const innerType = T;
-        inner: *T = undefined,
+
+        pub inline fn get(self: *Self) *T {
+            return self.inner;
+        }
     };
 }
 
@@ -1439,62 +1447,62 @@ pub const ResourceRegistry = struct {
     }
 };
 
-fn HeapFlagSet(comptime F: type) type {
-    return struct {
-        registered_buf: [max]*Info = undefined,
-        registered_len: usize = 0,
-
-        const Self = @This();
-        pub const max = std.math.maxInt(FlagInt);
-        pub const FlagEnum = enum(F) { _ };
-        pub const Set = std.enums.EnumSet(FlagSet);
-        pub const Info = struct {
-            name: []const u8,
-            hash: u32,
-            size: usize,
-            alignment: usize,
-            flag: ?CompFlag = null,
-            pub inline fn init(comptime T: type) *Self.Info {
-                return &struct {
-                    var info: Self.Info = .{
-                        .name = @typeName(T),
-                        .hash = hashType(T),
-                        .size = @sizeOf(T),
-                        .alignment = @alignOf(T),
-                    };
-                }.info;
-            }
-        };
-
-        pub inline fn getFlag(self: *Self, comptime T: type) FlagEnum {
-            const typeId = Info.init(T);
-            return self.register(typeId);
-        }
-        pub fn register(self: *Self, id: *Info) FlagEnum {
-            if (id.flag) |f| {
-                @branchHint(.likely);
-                return f;
-            }
-
-            if (self.registered_len >= max) {
-                @panic("set type overflow, increase component count");
-            }
-
-            const flag: FlagEnum = @enumFromInt(self.registered_len);
-            id.flag = flag;
-
-            self.registered_buf[self.registered_len] = id;
-            _ = @atomicRmw(@TypeOf(self.registered_len), &self.registered_len, .Add, 1, .release);
-
-            return flag;
-        }
-
-        pub fn getId(self: FlagEnum) *Info {
-            assert(@intFromEnum(self) < self.registered_len);
-            return self.registered_buf[@intFromEnum(self)];
-        }
-    };
-}
+// fn HeapFlagSet(comptime F: type) type {
+//     return struct {
+//         registered_buf: [max]Info = undefined,
+//         registered_len: usize = 0,
+//
+//         const Self = @This();
+//         pub const max = std.math.maxInt(FlagInt);
+//         pub const FlagEnum = enum(F) { _ };
+//         pub const Set = std.enums.EnumSet(FlagSet);
+//         pub const Info = struct {
+//             name: []const u8,
+//             hash: u32,
+//             size: usize,
+//             alignment: usize,
+//             serialize: ?*const fn (ptr: *anyopaque, writer: std.Io.Writer) EcsError!void,
+//             // pub inline fn init(comptime T: type) *Self.Info {
+//             //     return &struct {
+//             //         var info: Self.Info = .{
+//             //             .name = @typeName(T),
+//             //             .hash = hashType(T),
+//             //             .size = @sizeOf(T),
+//             //             .alignment = @alignOf(T),
+//             //         };
+//             //     }.info;
+//             // }
+//         };
+//
+//         pub inline fn getFlag(self: *Self, comptime T: type) FlagEnum {
+//             const typeId = Info.init(T);
+//             return self.register(typeId);
+//         }
+//         pub fn register(self: *Self, id: *Info) FlagEnum {
+//             if (id.flag) |f| {
+//                 @branchHint(.likely);
+//                 return f;
+//             }
+//
+//             if (self.registered_len >= max) {
+//                 @panic("set type overflow, increase component count");
+//             }
+//
+//             const flag: FlagEnum = @enumFromInt(self.registered_len);
+//             id.flag = flag;
+//
+//             self.registered_buf[self.registered_len] = id;
+//             _ = @atomicRmw(@TypeOf(self.registered_len), &self.registered_len, .Add, 1, .release);
+//
+//             return flag;
+//         }
+//
+//         pub fn getId(self: FlagEnum) *Info {
+//             assert(@intFromEnum(self) < self.registered_len);
+//             return self.registered_buf[@intFromEnum(self)];
+//         }
+//     };
+// }
 
 /// type bit set enum
 fn FlagSet(comptime F: type) type {
@@ -2069,9 +2077,6 @@ pub const ArchType = struct {
 // Arch Registry
 // *************************************************
 pub const ComponentRegistry = struct {
-    // _ = max_components;
-    const Self = @This();
-    const CHUNK_SIZE: usize = 64;
     // --------------------------- TODO: group these
     // const EntityMeta = struct { arch_id: usize, mask: Co };
     /// entity -> mask
@@ -2081,6 +2086,8 @@ pub const ComponentRegistry = struct {
     /// group mask -> arch id
     archtypes_lookup: std.AutoHashMapUnmanaged(CompFlag.Set, usize) = .{},
     archtypes: std.ArrayList(ArchType) = .{},
+    const Self = @This();
+    const CHUNK_SIZE: usize = 64;
 
     pub fn getOrPutMask(self: *Self, gpa: std.mem.Allocator, entity: Entity) !*CompFlag.Set {
         const res = try self.mask_lookup.getOrPut(gpa, entity);
