@@ -19,7 +19,7 @@ pub const AppDesc = struct {
     max_frame_mem: usize = 64 * MB,
     max_components: comptime_int = 128, // TODO: reimplement, this does currently nothing
     // TODO: defines max components and resources bit sets
-    // FlagType: type = u8,
+    FlagInt: type = u6,
 };
 
 /// The memory dictator
@@ -201,14 +201,17 @@ pub const Children = struct {
 /// Needs to have a fixed position in memory and called init on.
 pub fn App(comptime desc: AppDesc) type {
     return struct {
+        // ----------------------------------------
         memtator: Memtator,
         entities: struct {
             entity_mutex: std.Thread.Mutex = .{},
             unused: std.ArrayList(Entity) = .{},
             count: u32 = 0,
         } = .{},
-        components: ComponentRegistry = .{},
-        resources: ResourceRegistry = .{},
+
+        components: ComponentRegistry(desc.FlagInt) = .{},
+        resources: ResourceRegistry(desc.FlagInt) = .{},
+
         systems: SystemRegistry = .{},
         commands: CommandRegistry = .{},
         hooks: HookRegistry(desc) = .{},
@@ -217,10 +220,9 @@ pub fn App(comptime desc: AppDesc) type {
         const World = @This();
 
         pub fn init(gpa: std.mem.Allocator) EcsError!*World {
-            var self = try gpa.create(World);
-
             const memtator = try Memtator.init(gpa, desc.max_frame_mem);
-            const systems = try SystemRegistry.init(self.memtator.world());
+            const systems = try SystemRegistry.init(gpa);
+            const self = try gpa.create(World);
 
             self.* = .{
                 .memtator = memtator,
@@ -290,12 +292,17 @@ pub fn App(comptime desc: AppDesc) type {
             try self.resources.register(self.memtator.world(), res);
         }
 
+        /// does not overwrite existing resource
+        pub fn tryAddResource(self: *World, res: anytype) !void {
+            try self.resources.tryRegister(self.memtator.world(), res);
+        }
+
         pub fn addOnDespawnHook(
             self: *World,
             comptime T: type,
             comptime hook_fn: *const fn (*T, Entity, *World) EcsError!void,
         ) EcsError!void {
-            try self.hooks.OnDespawnComp(self.memtator.world(), T, hook_fn);
+            try self.hooks.OnDespawnComp(self, self.memtator.world(), T, hook_fn);
         }
 
         pub fn addOnAddHook(
@@ -303,7 +310,7 @@ pub fn App(comptime desc: AppDesc) type {
             comptime T: type,
             comptime hook_fn: *const fn (*T, Entity, *World) EcsError!void,
         ) EcsError!void {
-            try self.hooks.OnAddComp(self.memtator.world(), T, hook_fn);
+            try self.hooks.OnAddComp(self, self.memtator.world(), T, hook_fn);
         }
 
         pub fn addOnRemoveHook(
@@ -311,19 +318,19 @@ pub fn App(comptime desc: AppDesc) type {
             comptime T: type,
             comptime hook_fn: *const fn (*T, Entity, *World) EcsError!void,
         ) EcsError!void {
-            try self.hooks.OnRemoveComp(self.memtator.world(), T, hook_fn);
+            try self.hooks.OnRemoveComp(self, self.memtator.world(), T, hook_fn);
         }
 
         /// add a system
         /// accepts single function or tuple of function.
         pub fn addSystem(self: *World, schedule: anytype, comptime func: anytype) !void {
-            try self.systems.add(self.memtator.world(), schedule, func, null);
+            try self.systems.add(self.memtator.world(), self, schedule, func, null);
         }
 
         /// add a system with a run time condition
         /// accepts single function or tuple of functions.
         pub fn addSystemEx(self: *World, schedule: anytype, comptime run_fn: anytype, comptime condition_fn: SystemRegistry.ConditionFn) !void {
-            try self.systems.add(self.memtator.world(), schedule, run_fn, condition_fn);
+            try self.systems.add(self.memtator.world(), self, schedule, run_fn, condition_fn);
         }
 
         ///! get a resource
@@ -436,18 +443,18 @@ pub fn App(comptime desc: AppDesc) type {
             // --------------------------
             const Self = @This();
             const LocalRegistry = ResourceRegistry;
-            pub const ConditionFn = *const fn (*World, *LocalRegistry) EcsError!bool;
-            pub const SystemFn = *const fn (*anyopaque, *World, *LocalRegistry, u32) EcsError!void;
+            pub const ConditionFn = *const fn (*World, *LocalRegistry(desc.FlagInt)) EcsError!bool;
+            pub const SystemFn = *const fn (*anyopaque, *World, *LocalRegistry(desc.FlagInt), u32) EcsError!void;
             pub const SystemID = struct { slot: usize };
             const ScheduleID = u32;
             /// a system's mem represntation
             pub const OpaqueSystem = struct {
-                access: Access,
+                access: Access(desc.FlagInt),
                 ptr: *anyopaque,
                 run: SystemRegistry.SystemFn,
                 condition: ?SystemRegistry.ConditionFn = null,
                 debug: []u8,
-                locals: LocalRegistry = .{},
+                locals: LocalRegistry(desc.FlagInt) = .{},
                 run_time_ns: i128 = 0,
                 batch_id: usize = 0,
                 last_run_tick: u32 = 0,
@@ -548,6 +555,7 @@ pub fn App(comptime desc: AppDesc) type {
             fn putSystem(
                 self: *Self,
                 gpa: std.mem.Allocator,
+                app: *App(desc),
                 comptime system: anytype,
                 comptime condition_fn: ?ConditionFn,
             ) EcsError!SystemID {
@@ -560,13 +568,13 @@ pub fn App(comptime desc: AppDesc) type {
                 const fnType = @typeInfo(@TypeOf(func)).pointer.child;
                 const info = @typeInfo(fnType);
 
-                var access: Access = .{};
+                var access: Access(desc.FlagInt) = .{};
                 inline for (info.@"fn".params) |*p| {
                     const PT = p.type.?;
                     if (@typeInfo(PT) != .@"struct") @compileError(cprint("System param must be struct with method `fromWorld(w:*World)Self` in `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
 
                     if (@hasDecl(PT, "addAccess")) {
-                        PT.addAccess(&access);
+                        PT.addAccess(app, &access);
                     }
 
                     if (@hasDecl(PT, "SelfValidate")) {
@@ -580,7 +588,7 @@ pub fn App(comptime desc: AppDesc) type {
                     .condition = condition_fn,
                     .debug = try std.fmt.allocPrint(gpa, "{s}", .{fn_name}),
                     .run = (struct {
-                        fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry, last_run_tick: u32) EcsError!void {
+                        fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry(desc.FlagInt), last_run_tick: u32) EcsError!void {
                             const sys_func: *fnType = @ptrCast(@alignCast(ptr));
                             var sys_args: genArgType(info.@"fn".params) = undefined;
                             inline for (info.@"fn".params, 0..) |*p, i| {
@@ -624,6 +632,7 @@ pub fn App(comptime desc: AppDesc) type {
             pub fn add(
                 self: *Self,
                 gpa: std.mem.Allocator,
+                app: *App(desc),
                 schedule: anytype,
                 comptime system: anytype,
                 comptime condition_fn: ?ConditionFn,
@@ -638,7 +647,7 @@ pub fn App(comptime desc: AppDesc) type {
                     .@"struct" => |_struct| {
                         if (!_struct.is_tuple) @compileLog("system must be tuple");
                         inline for (system) |func| {
-                            const id = try self.putSystem(gpa, func, condition_fn);
+                            const id = try self.putSystem(gpa, app, func, condition_fn);
                             try set.value_ptr.systems.append(gpa, .{ .id = id });
                         }
                     },
@@ -654,7 +663,7 @@ pub fn App(comptime desc: AppDesc) type {
                                         // add group with same deps
                                         const tuple_deps = try deps.clone(gpa);
                                         inline for (field) |func| {
-                                            const id = try self.putSystem(gpa, func, condition_fn);
+                                            const id = try self.putSystem(gpa, app, func, condition_fn);
                                             try set.value_ptr.systems.append(gpa, .{
                                                 .id = id,
                                                 .deps = tuple_deps,
@@ -664,7 +673,7 @@ pub fn App(comptime desc: AppDesc) type {
                                         }
                                     },
                                     else => {
-                                        const id = try self.putSystem(gpa, field, condition_fn);
+                                        const id = try self.putSystem(gpa, app, field, condition_fn);
                                         try set.value_ptr.systems.append(gpa, .{
                                             .id = id,
                                             .deps = if (deps.items.len > 0) try deps.clone(gpa) else null,
@@ -677,7 +686,7 @@ pub fn App(comptime desc: AppDesc) type {
                         }
                     },
                     else => {
-                        const id = try self.putSystem(gpa, system, condition_fn);
+                        const id = try self.putSystem(gpa, app, system, condition_fn);
                         try set.value_ptr.systems.append(gpa, .{ .id = id });
                     },
                 }
@@ -770,7 +779,7 @@ pub fn App(comptime desc: AppDesc) type {
                 // Optimized queue entry with dependency tracking
                 const QueueEntry = struct {
                     id: SystemID,
-                    access: Access,
+                    access: Access(desc.FlagInt),
                 };
 
                 // Multi-container architecture for efficient scheduling
@@ -808,7 +817,7 @@ pub fn App(comptime desc: AppDesc) type {
                 // prep batches
                 while (scheduled_systems.items.len > 0) {
                     var batch = std.ArrayList(SystemID){};
-                    var access = Access{};
+                    var access = Access(desc.FlagInt){};
 
                     var remove_list = std.ArrayList(usize){};
                     var update_deps = std.ArrayList(SystemID){};
@@ -875,7 +884,7 @@ pub fn App(comptime desc: AppDesc) type {
             comptime bsys: SystemRegistry.ConditionFn,
         ) SystemRegistry.ConditionFn {
             return (struct {
-                fn and_con(world: *World, locals: *ResourceRegistry) EcsError!bool {
+                fn and_con(world: *World, locals: *ResourceRegistry(desc.FlagInt)) EcsError!bool {
                     const a = try asys(world, locals);
                     const b = try bsys(world, locals);
                     return a and b;
@@ -888,7 +897,7 @@ pub fn App(comptime desc: AppDesc) type {
             comptime bsys: SystemRegistry.ConditionFn,
         ) SystemRegistry.ConditionFn {
             return (struct {
-                fn or_cond(world: *World, locals: *ResourceRegistry) EcsError!bool {
+                fn or_cond(world: *World, locals: *ResourceRegistry(desc.FlagInt)) EcsError!bool {
                     const a = try asys(world, locals);
                     const b = try bsys(world, locals);
                     return a or b;
@@ -912,8 +921,8 @@ pub fn App(comptime desc: AppDesc) type {
                     return self.inner;
                 }
 
-                pub fn addAccess(access: *Access) void {
-                    const flag = ResFlag.getFlag(R);
+                pub fn addAccess(world: *World, access: *Access(desc.FlagInt)) void {
+                    const flag = world.resources.resource_flags.getFlag(R);
                     access.res_read_write.insert(flag);
                 }
             };
@@ -935,8 +944,8 @@ pub fn App(comptime desc: AppDesc) type {
                     return self.inner;
                 }
 
-                pub fn addAccess(access: *Access) void {
-                    const flag = ResFlag.getFlag(R);
+                pub fn addAccess(world: *World, access: *Access(desc.FlagInt)) void {
+                    const flag = world.resources.resource_flags.getFlag(R);
                     access.res_write.insert(flag);
                     access.res_read_write.insert(flag);
                 }
@@ -1163,7 +1172,7 @@ pub fn App(comptime desc: AppDesc) type {
                     fn run(ctx: *anyopaque, world: *World) EcsError!void {
                         const ent: *Entity = @ptrCast(@alignCast(ctx));
                         if (world.isValid(ent.*)) {
-                            const flag = CompFlag.getFlag(C);
+                            const flag = world.components.component_flags.getFlag(C);
 
                             if (world.hooks.remove_hooks.contains(flag)) {
                                 const comp = world.components.getSingle(ent.*, C).?;
@@ -1205,7 +1214,7 @@ pub fn App(comptime desc: AppDesc) type {
                                 else => @compileError("component in insert must be of type struct/enum/union, `" ++ @typeName(@TypeOf(bundle)) ++ "` given"),
                             }
 
-                            const flag = CompFlag.getFlag(@TypeOf(bundle));
+                            const flag = world.components.component_flags.getFlag(@TypeOf(bundle));
                             try world.hooks.runAddedHook(flag, &args.bundle, args.ent, world);
                             try world.components.add(world.memtator.world(), world.world_tick, args.ent, args.bundle);
                             return;
@@ -1242,7 +1251,7 @@ pub fn App(comptime desc: AppDesc) type {
                                 // hooks
                                 const info = @typeInfo(ArgType);
                                 if (!info.@"struct".fields[i].is_comptime) {
-                                    const flag = CompFlag.getFlag(CompType);
+                                    const flag = world.components.component_flags.getFlag(CompType);
                                     try world.hooks.runAddedHook(flag, &args.bundle[i], args.ent, world);
                                 }
 
@@ -1281,6 +1290,10 @@ pub fn App(comptime desc: AppDesc) type {
 
         pub fn Query(query: anytype) type {
             return IQueryFiltered(desc, query, .{});
+        }
+
+        pub fn QueryS(comptime Q: type, filter: anytype) type {
+            return IQueryStructFiltered(desc, Q, filter);
         }
 
         pub fn QueryFiltered(query: anytype, filter: anytype) type {
@@ -1404,912 +1417,862 @@ const Resource = struct {
     }
 };
 
-pub const ResourceRegistry = struct {
-    const ResID = u32;
-    const TypeID = u32;
-    const Self = @This();
-
-    data: std.AutoHashMapUnmanaged(TypeID, Resource) = .{},
-
-    pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        var it = self.data.iterator();
-        while (it.next()) |entry| entry.value_ptr.deinit(entry.value_ptr.ctx, gpa);
-        self.data.deinit(gpa);
-    }
-
-    pub fn get(self: *const Self, comptime T: type) ?*T {
-        const hash = hashType(T);
-        const res = self.data.get(hash) orelse return null;
-        return Resource.cast(res.ctx, T);
-    }
-
-    pub fn getOrDefault(self: *Self, gpa: std.mem.Allocator, comptime T: type) !*T {
-        const hash = hashType(T);
-        const entry = try self.data.getOrPut(gpa, hash);
-        if (!entry.found_existing) entry.value_ptr.* = Resource.init(T{}, gpa);
-        return Resource.cast(entry.value_ptr.ctx, T);
-    }
-
-    pub fn remove(self: *Self, gpa: std.mem.Allocator, comptime R: type) !void {
-        const hash = hashType(R);
-        const entry = self.data.fetchRemove(hash) orelse return;
-        entry.value.deinit(entry.value.ctx, gpa);
-    }
-
-    pub fn register(self: *Self, gpa: std.mem.Allocator, resource: anytype) !void {
-        const ResType = @TypeOf(resource);
-        const hash = hashType(ResType);
-        const entry = try self.data.getOrPut(gpa, hash);
-        if (entry.found_existing) {
-            entry.value_ptr.deinit(entry.value_ptr.ctx, gpa);
-        }
-        entry.value_ptr.* = Resource.init(resource, gpa);
-    }
-};
-
-// fn HeapFlagSet(comptime F: type) type {
-//     return struct {
-//         registered_buf: [max]Info = undefined,
-//         registered_len: usize = 0,
-//
-//         const Self = @This();
-//         pub const max = std.math.maxInt(FlagInt);
-//         pub const FlagEnum = enum(F) { _ };
-//         pub const Set = std.enums.EnumSet(FlagSet);
-//         pub const Info = struct {
-//             name: []const u8,
-//             hash: u32,
-//             size: usize,
-//             alignment: usize,
-//             serialize: ?*const fn (ptr: *anyopaque, writer: std.Io.Writer) EcsError!void,
-//             // pub inline fn init(comptime T: type) *Self.Info {
-//             //     return &struct {
-//             //         var info: Self.Info = .{
-//             //             .name = @typeName(T),
-//             //             .hash = hashType(T),
-//             //             .size = @sizeOf(T),
-//             //             .alignment = @alignOf(T),
-//             //         };
-//             //     }.info;
-//             // }
-//         };
-//
-//         pub inline fn getFlag(self: *Self, comptime T: type) FlagEnum {
-//             const typeId = Info.init(T);
-//             return self.register(typeId);
-//         }
-//         pub fn register(self: *Self, id: *Info) FlagEnum {
-//             if (id.flag) |f| {
-//                 @branchHint(.likely);
-//                 return f;
-//             }
-//
-//             if (self.registered_len >= max) {
-//                 @panic("set type overflow, increase component count");
-//             }
-//
-//             const flag: FlagEnum = @enumFromInt(self.registered_len);
-//             id.flag = flag;
-//
-//             self.registered_buf[self.registered_len] = id;
-//             _ = @atomicRmw(@TypeOf(self.registered_len), &self.registered_len, .Add, 1, .release);
-//
-//             return flag;
-//         }
-//
-//         pub fn getId(self: FlagEnum) *Info {
-//             assert(@intFromEnum(self) < self.registered_len);
-//             return self.registered_buf[@intFromEnum(self)];
-//         }
-//     };
-// }
-
-/// type bit set enum
-fn FlagSet(comptime F: type) type {
-    return enum(F) {
+pub fn ResourceRegistry(FlagInt: type) type {
+    return struct {
+        const ResID = u32;
+        const TypeID = u32;
         const Self = @This();
-        pub const max = std.math.maxInt(FlagInt);
-        pub const Set = std.enums.EnumSet(Self);
+
+        data: std.AutoHashMapUnmanaged(TypeID, Resource) = .{},
+        resource_flags: HeapFlagSet(FlagInt) = .{},
+
+        pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+            var it = self.data.iterator();
+            while (it.next()) |entry| entry.value_ptr.deinit(entry.value_ptr.ctx, gpa);
+            self.data.deinit(gpa);
+        }
+
+        pub fn get(self: *const Self, comptime T: type) ?*T {
+            const hash = hashType(T);
+            const res = self.data.get(hash) orelse return null;
+            return Resource.cast(res.ctx, T);
+        }
+
+        pub fn getOrDefault(self: *Self, gpa: std.mem.Allocator, comptime T: type) !*T {
+            const hash = hashType(T);
+            const entry = try self.data.getOrPut(gpa, hash);
+            if (!entry.found_existing) entry.value_ptr.* = Resource.init(T{}, gpa);
+            return Resource.cast(entry.value_ptr.ctx, T);
+        }
+
+        pub fn remove(self: *Self, gpa: std.mem.Allocator, comptime R: type) !void {
+            const hash = hashType(R);
+            const entry = self.data.fetchRemove(hash) orelse return;
+            entry.value.deinit(entry.value.ctx, gpa);
+        }
+
+        pub fn tryRegister(self: *Self, gpa: std.mem.Allocator, resource: anytype) !void {
+            const ResType = @TypeOf(resource);
+            const hash = hashType(ResType);
+
+            if (self.data.contains(hash)) return;
+            try self.data.put(gpa, hash, Resource.init(resource, gpa));
+        }
+
+        pub fn register(self: *Self, gpa: std.mem.Allocator, resource: anytype) !void {
+            const ResType = @TypeOf(resource);
+            const hash = hashType(ResType);
+            const entry = try self.data.getOrPut(gpa, hash);
+            if (entry.found_existing) {
+                entry.value_ptr.deinit(entry.value_ptr.ctx, gpa);
+            }
+            entry.value_ptr.* = Resource.init(resource, gpa);
+        }
+    };
+}
+
+fn HeapFlagSet(comptime FlagInt: type) type {
+    return struct {
+        const Self = @This();
+        const Max = std.math.maxInt(FlagInt);
+        pub const Flag = enum(FlagInt) { _ };
+        pub const Set = std.enums.EnumSet(Flag);
+
+        registered_hash: [Max]u32 = @splat(0),
+        registered_buf: [Max]Info = undefined,
+        registered_len: usize = 0,
+
         pub const Info = struct {
             name: []const u8,
             hash: u32,
             size: usize,
             alignment: usize,
-            flag: ?CompFlag = null,
-
-            // TODO: breaks dylib, heap mode soon?
-            pub inline fn init(comptime T: type) *Self.Info {
-                return &struct {
-                    var info: Self.Info = .{
-                        .name = @typeName(T),
-                        .hash = hashType(T),
-                        .size = @sizeOf(T),
-                        .alignment = @alignOf(T),
-                    };
-                }.info;
-            }
+            serialize: ?*const fn (ptr: *anyopaque, writer: std.Io.Writer) EcsError!void,
         };
-        // ------------------------
-        var registered_buf: [max]*Info = undefined;
-        var registered_len: usize = 0;
-        _,
-        // ------------------------
-        pub inline fn getFlag(comptime T: type) CompFlag {
-            const typeId = CompInfo.init(T);
-            return Self.register(typeId);
-        }
-        pub fn register(id: CompId) CompFlag {
-            if (id.flag) |f| {
-                @branchHint(.likely);
-                return f;
+
+        pub inline fn getFlag(self: *Self, comptime T: type) Flag {
+            const hash = hashType(T);
+
+            for (self.registered_hash, 0..) |h, i| {
+                if (h == hash) return @enumFromInt(i);
             }
 
-            if (registered_len >= max) {
-                @panic("set type overflow, increase component count");
-            }
+            const index = @atomicRmw(@TypeOf(self.registered_len), &self.registered_len, .Add, 1, .release);
 
-            const flag: CompFlag = @enumFromInt(registered_len);
-            id.flag = flag;
+            self.registered_hash[index] = hash;
+            self.registered_buf[index] = .{
+                .name = @typeName(T),
+                .hash = hash,
+                .size = @sizeOf(T),
+                .alignment = @alignOf(T),
+                .serialize = null,
+            };
 
-            registered_buf[registered_len] = id;
-            _ = @atomicRmw(@TypeOf(registered_len), &registered_len, .Add, 1, .release);
-
-            return flag;
+            return @enumFromInt(index);
         }
 
-        pub fn getId(self: CompFlag) *Info {
-            assert(@intFromEnum(self) < registered_len);
-            return registered_buf[@intFromEnum(self)];
+        pub fn getId(self: *Self, flag: Flag) *Info {
+            assert(@intFromEnum(flag) < self.registered_len);
+            return &self.registered_buf[@intFromEnum(flag)];
         }
     };
 }
 
-// ------------------------------------
-/// TODO: move to AppDesc
-/// 128 components & resources limit
-const FlagInt = u7;
-
-pub const CompFlag = FlagSet(FlagInt);
-pub const CompInfo = CompFlag.Info;
-pub const CompId = *CompFlag.Info;
-
-pub const ResFlag = FlagSet(FlagInt);
-pub const ResInfo = CompFlag.Info;
-pub const ResId = *ResFlag.Info;
-// ------------------------------------
-
 /// access flags for lock free concurrency
-pub const Access = struct {
-    comp_read_write: CompFlag.Set = .{},
-    comp_write: CompFlag.Set = .{},
-    res_read_write: ResFlag.Set = .{},
-    res_write: ResFlag.Set = .{},
+pub fn Access(FlagInt: type) type {
+    const FlagSet = HeapFlagSet(FlagInt);
+    return struct {
+        const Self = @This();
+        comp_read_write: FlagSet.Set = .{},
+        comp_write: FlagSet.Set = .{},
+        res_read_write: FlagSet.Set = .{},
+        res_write: FlagSet.Set = .{},
 
-    pub fn isCompatible(self: *const Access, lhs: *const Access) bool {
-        return self.comp_compatible(lhs) and self.res_compatible(lhs);
-    }
+        pub fn isCompatible(self: *const Self, lhs: *const Self) bool {
+            return self.comp_compatible(lhs) and self.res_compatible(lhs);
+        }
 
-    fn merge(self: *Access, lhs: *const Access) void {
-        self.comp_read_write.setUnion(lhs.comp_read_write);
-        self.comp_write.setUnion(lhs.comp_write);
-        self.res_read_write.setUnion(lhs.res_read_write);
-        self.res_write.setUnion(lhs.res_write);
-    }
+        fn merge(self: *Self, lhs: *const Self) void {
+            self.comp_read_write.setUnion(lhs.comp_read_write);
+            self.comp_write.setUnion(lhs.comp_write);
+            self.res_read_write.setUnion(lhs.res_read_write);
+            self.res_write.setUnion(lhs.res_write);
+        }
 
-    inline fn comp_compatible(self: *const Access, lhs: *const Access) bool {
-        const empty = CompFlag.Set.initEmpty();
-        if (!self.comp_read_write.intersectWith(lhs.comp_write).eql(empty)) return false;
-        if (!self.comp_write.intersectWith(lhs.comp_read_write).eql(empty)) return false;
-        if (!self.comp_write.intersectWith(lhs.comp_write).eql(empty)) return false;
-        return true;
-    }
+        inline fn comp_compatible(self: *const Self, lhs: *const Self) bool {
+            const empty = FlagSet.Set.initEmpty();
+            if (!self.comp_read_write.intersectWith(lhs.comp_write).eql(empty)) return false;
+            if (!self.comp_write.intersectWith(lhs.comp_read_write).eql(empty)) return false;
+            if (!self.comp_write.intersectWith(lhs.comp_write).eql(empty)) return false;
+            return true;
+        }
 
-    inline fn res_compatible(self: *const Access, lhs: *const Access) bool {
-        const empty = ResFlag.Set.initEmpty();
-        if (!self.res_read_write.intersectWith(lhs.res_write).eql(empty)) return false;
-        if (!self.res_write.intersectWith(lhs.res_read_write).eql(empty)) return false;
-        if (!self.res_write.intersectWith(lhs.res_write).eql(empty)) return false;
-        return true;
-    }
-};
+        inline fn res_compatible(self: *const Self, lhs: *const Self) bool {
+            const empty = FlagSet.Set.initEmpty();
+            if (!self.res_read_write.intersectWith(lhs.res_write).eql(empty)) return false;
+            if (!self.res_write.intersectWith(lhs.res_read_write).eql(empty)) return false;
+            if (!self.res_write.intersectWith(lhs.res_write).eql(empty)) return false;
+            return true;
+        }
+    };
+}
 
 /// ArchType = opaque runtime MultiArrayList
-pub const ArchType = struct {
-    const Self = @This();
-    const ColMeta = struct {
-        flag: CompFlag,
-        offset: usize,
-        size: usize,
-    };
-    pub const TickInfo = struct {
-        added: u32 = 0,
-        changed: u32 = 0,
-    };
-    /// allocate in chunks of:
-    chunk_size: usize = 512,
-    mask: CompFlag.Set = CompFlag.Set.initEmpty(),
-    /// Archtable layout |XX = pad
-    /// |ENTITY-SLICE----|XX|C1-SLICE----------|X|C2-SLICE--------- ..
-    /// |ENTITY,ENTITY.. |XX|C1,C1..Tick,Tick..|X|C2,C2..Tick,Tick..
-    bytes: []u8 = undefined,
-    alignment: usize = 0,
-    columns: std.ArrayList(ColMeta) = .{},
-    /// entity -> index
-    entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
-    /// comp hash -> comps index
-    column_lookup: std.AutoHashMapUnmanaged(CompFlag, usize) = .{},
-    len: usize = 0,
-    capacity: usize = 0,
-
-    pub fn addComp(self: *Self, gpa: std.mem.Allocator, flag: CompFlag) !void {
-        assert(self.len == 0);
-
-        const id = flag.getId();
-        const col_meta = ColMeta{
-            .size = id.size,
-            .flag = flag,
-            .offset = 0,
+fn ArchType(FlagInt: type) type {
+    return struct {
+        const Self = @This();
+        const CompFlag = HeapFlagSet(FlagInt).Flag;
+        const ColMeta = struct {
+            flag: CompFlag,
+            offset: usize,
+            size: usize,
         };
+        pub const TickInfo = struct {
+            added: u32 = 0,
+            changed: u32 = 0,
+        };
+        /// allocate in chunks of:
+        chunk_size: usize = 512,
+        mask: HeapFlagSet(FlagInt).Set = .initEmpty(),
+        /// Archtable layout |XX = pad
+        /// |ENTITY-SLICE----|XX|C1-SLICE----------|X|C2-SLICE--------- ..
+        /// |ENTITY,ENTITY.. |XX|C1,C1..Tick,Tick..|X|C2,C2..Tick,Tick..
+        bytes: []u8 = undefined,
+        alignment: usize = 0,
+        columns: std.ArrayList(ColMeta) = .{},
+        /// entity -> index
+        entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
+        /// comp hash -> comps index
+        column_lookup: std.AutoHashMapUnmanaged(CompFlag, usize) = .{},
+        len: usize = 0,
+        capacity: usize = 0,
 
-        const typeId = col_meta.flag.getId();
+        pub fn addComp(self: *Self, gpa: std.mem.Allocator, flags: *HeapFlagSet(FlagInt), flag: CompFlag) !void {
+            assert(self.len == 0);
 
-        if (typeId.alignment > self.alignment) self.alignment = typeId.alignment;
-        if (self.alignment == 0) self.alignment = 1;
+            const id = flags.getId(flag);
 
-        self.mask.insert(flag);
-        try self.columns.append(gpa, col_meta);
-        try self.column_lookup.put(gpa, flag, self.columns.items.len - 1);
-        self.calcTableOffsets();
-    }
+            const col_meta = ColMeta{
+                .size = id.size,
+                .flag = flag,
+                .offset = 0,
+            };
 
-    pub fn removeComp(self: *Self, flag: CompFlag) void {
-        assert(self.len == 0);
-        self.mask.remove(flag);
+            const typeId = flags.getId(col_meta.flag);
 
-        const last_comp_meta = self.columns.items[self.columns.items.len - 1];
-        const en = self.column_lookup.fetchRemove(flag).?;
+            if (typeId.alignment > self.alignment) self.alignment = typeId.alignment;
+            if (self.alignment == 0) self.alignment = 1;
 
-        assert(self.columns.items.len > 0);
-
-        // TODO:
-        // handle empty archtype case: last comp = removed comp
-        // assert(en.key != last_comp_meta_hash);
-        // swap remove with last comp
-        _ = self.columns.swapRemove(en.value);
-
-        // update last comp lookup
-        if (en.key != last_comp_meta.flag) {
-            const lookup_entry = self.column_lookup.getPtr(last_comp_meta.flag).?;
-            lookup_entry.* = en.value;
+            self.mask.insert(flag);
+            try self.columns.append(gpa, col_meta);
+            try self.column_lookup.put(gpa, flag, self.columns.items.len - 1);
+            self.calcTableOffsets(flags);
         }
 
-        self.calcTableOffsets();
-    }
+        pub fn removeComp(self: *Self, flags: *HeapFlagSet(FlagInt), flag: CompFlag) void {
+            assert(self.len == 0);
+            self.mask.remove(flag);
 
-    pub fn remove(self: *Self, gpa: std.mem.Allocator, entity: Entity) !void {
-        assert(self.len > 0);
+            const last_comp_meta = self.columns.items[self.columns.items.len - 1];
+            const en = self.column_lookup.fetchRemove(flag).?;
 
-        // remove entity from lookup
-        const en = self.entity_lookup.fetchRemove(entity) orelse return EcsError.EntityNotFound;
-        assert(en.value < self.len);
+            assert(self.columns.items.len > 0);
 
-        defer self.len -= 1;
+            // TODO:
+            // handle empty archtype case: last comp = removed comp
+            // assert(en.key != last_comp_meta_hash);
+            // swap remove with last comp
+            _ = self.columns.swapRemove(en.value);
 
-        if (en.value == self.len - 1) return;
+            // update last comp lookup
+            if (en.key != last_comp_meta.flag) {
+                const lookup_entry = self.column_lookup.getPtr(last_comp_meta.flag).?;
+                lookup_entry.* = en.value;
+            }
 
-        // Get the entity that will be moved from the last position
-        const moved_entity = self.getEntity(self.len - 1);
-
-        // swap remove entity + components
-        self.swapRemoveEntitiy(en.value);
-        for (self.columns.items) |*meta| {
-            self.swapRemoveComp(en.value, meta);
+            self.calcTableOffsets(flags);
         }
 
-        // Update the entity lookup for the moved entity
-        try self.entity_lookup.put(gpa, moved_entity, en.value);
-    }
+        pub fn remove(self: *Self, gpa: std.mem.Allocator, entity: Entity) !void {
+            assert(self.len > 0);
 
-    pub fn put(self: *Self, gpa: std.mem.Allocator, tick: u32, entity: Entity, bundle: anytype) !void {
-        if (self.len >= self.capacity) {
-            try self.setCapacity(gpa, self.capacity + self.chunk_size);
+            // remove entity from lookup
+            const en = self.entity_lookup.fetchRemove(entity) orelse return EcsError.EntityNotFound;
+            assert(en.value < self.len);
+
+            defer self.len -= 1;
+
+            if (en.value == self.len - 1) return;
+
+            // Get the entity that will be moved from the last position
+            const moved_entity = self.getEntity(self.len - 1);
+
+            // swap remove entity + components
+            self.swapRemoveEntitiy(en.value);
+            for (self.columns.items) |*meta| {
+                self.swapRemoveComp(en.value, meta);
+            }
+
+            // Update the entity lookup for the moved entity
+            try self.entity_lookup.put(gpa, moved_entity, en.value);
         }
 
-        var is_new = false;
-        const index: usize = blk: {
+        pub fn put(self: *Self, gpa: std.mem.Allocator, flags: *HeapFlagSet(FlagInt), tick: u32, entity: Entity, bundle: anytype) !void {
+            if (self.len >= self.capacity) {
+                try self.setCapacity(gpa, flags, self.capacity + self.chunk_size);
+            }
+
+            var is_new = false;
+            const index: usize = blk: {
+                const res = try self.entity_lookup.getOrPut(gpa, entity);
+                if (res.found_existing) break :blk res.value_ptr.*;
+
+                res.value_ptr.* = self.len;
+                const offset = @sizeOf(Entity) * self.len;
+                @memcpy(self.bytes[offset .. offset + @sizeOf(Entity)], std.mem.asBytes(&entity));
+
+                is_new = true;
+                self.len += 1;
+                errdefer self.len -= 1;
+                break :blk res.value_ptr.*;
+            };
+
+            assert(self.capacity > index);
+
+            inline for (bundle) |comp| {
+
+                // skip tuples, tuple = child entity
+                if (isTuple(@TypeOf(comp))) continue;
+
+                // TODO: maybe should not create new entries?
+                const flag = flags.getFlag(@TypeOf(comp));
+                const meta = self.getMeta(flag).?;
+
+                self.putRaw(tick, tick, index, meta, std.mem.asBytes(&comp));
+            }
+        }
+
+        pub inline fn putRaw(self: *Self, changed_tick: u32, added_tick: u32, index: usize, meta: *const ColMeta, bytes: []const u8) void {
+            assert(self.capacity >= index);
+            const comp_offset = meta.offset + meta.size * index;
+            @memcpy(self.bytes[comp_offset .. comp_offset + meta.size], bytes);
+            const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
+            @memcpy(self.bytes[tick_offset .. tick_offset + @sizeOf(TickInfo)], std.mem.asBytes(&TickInfo{
+                .added = added_tick,
+                .changed = changed_tick,
+            }));
+        }
+
+        pub inline fn putSingle(self: *Self, gpa: std.mem.Allocator, flags: *HeapFlagSet(FlagInt), tick: u32, entity: Entity, comp: anytype) EcsError!void {
+            if (self.len >= self.capacity) {
+                try self.setCapacity(gpa, flags, self.capacity + self.chunk_size);
+            }
+
+            const index = try self.putEntity(gpa, entity);
+            assert(self.capacity >= index);
+
+            const flag = flags.getFlag(@TypeOf(comp));
+            const meta = self.getMeta(flag).?;
+            const bytes: []const u8 = @alignCast(std.mem.asBytes(&comp));
+            self.putRaw(tick, tick, index, meta, bytes);
+        }
+
+        pub inline fn putEntity(self: *Self, gpa: std.mem.Allocator, entity: Entity) EcsError!usize {
             const res = try self.entity_lookup.getOrPut(gpa, entity);
-            if (res.found_existing) break :blk res.value_ptr.*;
-
+            if (res.found_existing) return res.value_ptr.*;
             res.value_ptr.* = self.len;
             const offset = @sizeOf(Entity) * self.len;
             @memcpy(self.bytes[offset .. offset + @sizeOf(Entity)], std.mem.asBytes(&entity));
-
-            is_new = true;
             self.len += 1;
-            errdefer self.len -= 1;
-            break :blk res.value_ptr.*;
-        };
+            return res.value_ptr.*;
+        }
 
-        assert(self.capacity > index);
+        pub inline fn getEntity(self: *Self, index: usize) Entity {
+            assert(self.len > index);
+            const offset = @sizeOf(Entity) * index;
+            const ent: *Entity = @ptrCast(@alignCast(self.bytes[offset .. offset + @sizeOf(Entity)]));
+            return ent.*;
+        }
 
-        inline for (bundle) |comp| {
+        pub inline fn getSingleRawConst(self: *Self, index: usize, meta: *const ColMeta) []u8 {
+            const comp_offset = meta.offset + meta.size * index;
+            return self.bytes[comp_offset .. comp_offset + meta.size];
+        }
 
-            // skip tuples, tuple = child entity
-            if (isTuple(@TypeOf(comp))) continue;
+        pub inline fn getSingleRaw(self: *Self, index: usize, meta: *const ColMeta) []u8 {
+            const comp_offset = meta.offset + meta.size * index;
+            return self.bytes[comp_offset .. comp_offset + meta.size];
+        }
 
-            // TODO: maybe should not create new entries?
-            const flag = CompFlag.getFlag(@TypeOf(comp));
+        pub inline fn getSingle(self: *Self, flags: *HeapFlagSet(FlagInt), entity: Entity, comptime C: type) EcsError!*C {
+            const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const flag = flags.getFlag(C);
+            const meta = self.getMeta(flag) orelse return EcsError.ComponentNotFound;
+            return @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
+        }
+
+        /// updates the `changed` tick
+        pub inline fn getSingleAndUpdate(self: *Self, flags: *HeapFlagSet(FlagInt), tick: u32, entity: Entity, comptime C: type) EcsError!*C {
+            const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const flag = flags.getFlag(C);
+            const meta = self.getMeta(flag) orelse return EcsError.ComponentNotFound;
+            const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
+            @memcpy(self.bytes[tick_offset + 4 .. tick_offset + 8], std.mem.asBytes(&tick));
+            return @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
+        }
+
+        pub inline fn upateChanged(self: *Self, flags: *HeapFlagSet(FlagInt), tick: u32, index: usize, comptime C: type) void {
+            const flag = flags.getFlag(C);
             const meta = self.getMeta(flag).?;
-
-            self.putRaw(tick, tick, index, meta, std.mem.asBytes(&comp));
-        }
-    }
-
-    pub inline fn putRaw(self: *Self, changed_tick: u32, added_tick: u32, index: usize, meta: *const ColMeta, bytes: []const u8) void {
-        assert(self.capacity >= index);
-        const comp_offset = meta.offset + meta.size * index;
-        @memcpy(self.bytes[comp_offset .. comp_offset + meta.size], bytes);
-        const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
-        @memcpy(self.bytes[tick_offset .. tick_offset + @sizeOf(TickInfo)], std.mem.asBytes(&TickInfo{
-            .added = added_tick,
-            .changed = changed_tick,
-        }));
-    }
-
-    pub inline fn putSingle(self: *Self, gpa: std.mem.Allocator, tick: u32, entity: Entity, comp: anytype) EcsError!void {
-        if (self.len >= self.capacity) {
-            try self.setCapacity(gpa, self.capacity + self.chunk_size);
+            const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
+            @memcpy(self.bytes[tick_offset + 4 .. tick_offset + 8], std.mem.asBytes(&tick));
         }
 
-        const index = try self.putEntity(gpa, entity);
-        assert(self.capacity >= index);
-
-        const flag = CompFlag.getFlag(@TypeOf(comp));
-        const meta = self.getMeta(flag).?;
-        const bytes: []const u8 = @alignCast(std.mem.asBytes(&comp));
-        self.putRaw(tick, tick, index, meta, bytes);
-    }
-
-    pub inline fn putEntity(self: *Self, gpa: std.mem.Allocator, entity: Entity) EcsError!usize {
-        const res = try self.entity_lookup.getOrPut(gpa, entity);
-        if (res.found_existing) return res.value_ptr.*;
-        res.value_ptr.* = self.len;
-        const offset = @sizeOf(Entity) * self.len;
-        @memcpy(self.bytes[offset .. offset + @sizeOf(Entity)], std.mem.asBytes(&entity));
-        self.len += 1;
-        return res.value_ptr.*;
-    }
-
-    pub inline fn getEntity(self: *Self, index: usize) Entity {
-        assert(self.len > index);
-        const offset = @sizeOf(Entity) * index;
-        const ent: *Entity = @ptrCast(@alignCast(self.bytes[offset .. offset + @sizeOf(Entity)]));
-        return ent.*;
-    }
-
-    pub inline fn getSingleRawConst(self: *Self, index: usize, meta: *const ColMeta) []u8 {
-        const comp_offset = meta.offset + meta.size * index;
-        return self.bytes[comp_offset .. comp_offset + meta.size];
-    }
-
-    pub inline fn getSingleRaw(self: *Self, index: usize, meta: *const ColMeta) []u8 {
-        const comp_offset = meta.offset + meta.size * index;
-        return self.bytes[comp_offset .. comp_offset + meta.size];
-    }
-
-    pub inline fn getSingle(self: *Self, entity: Entity, comptime C: type) EcsError!*C {
-        const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-        const flag = CompFlag.getFlag(C);
-        const meta = self.getMeta(flag) orelse return EcsError.ComponentNotFound;
-        return @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
-    }
-
-    /// updates the `changed` tick
-    pub inline fn getSingleAndUpdate(self: *Self, tick: u32, entity: Entity, comptime C: type) EcsError!*C {
-        const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-        const flag = CompFlag.getFlag(C);
-        const meta = self.getMeta(flag) orelse return EcsError.ComponentNotFound;
-        const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
-        @memcpy(self.bytes[tick_offset + 4 .. tick_offset + 8], std.mem.asBytes(&tick));
-        return @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
-    }
-
-    pub inline fn upateChanged(self: *Self, tick: u32, index: usize, comptime C: type) void {
-        const flag = CompFlag.getFlag(C);
-        const meta = self.getMeta(flag).?;
-        const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
-        @memcpy(self.bytes[tick_offset + 4 .. tick_offset + 8], std.mem.asBytes(&tick));
-    }
-
-    pub inline fn getSingleConst(self: *Self, entity: Entity, comptime C: type) EcsError!*const C {
-        const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-        const flag = CompFlag.getFlag(C);
-        const meta = self.getMeta(flag).?;
-        return @ptrCast(@alignCast(self.getSingleRawConst(index, meta)));
-    }
-
-    pub inline fn getTickInfo(self: *Self, index: usize, meta: *const ColMeta) *const TickInfo {
-        assert(self.len > index);
-        const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
-        return @ptrCast(@alignCast(self.bytes[tick_offset .. tick_offset + @sizeOf(TickInfo)]));
-    }
-
-    pub inline fn getMeta(self: *Self, flag: CompFlag) ?*const ColMeta {
-        const index = self.column_lookup.get(flag) orelse return null;
-        return &self.columns.items[index];
-    }
-
-    pub fn moveTo(
-        self: *Self,
-        gpa: std.mem.Allocator,
-        entity: Entity,
-        dst: *Self,
-    ) !void {
-        assert(@intFromPtr(self) != @intFromPtr(dst));
-        assert(dst.capacity >= dst.len);
-
-        // For adding components: dst should contain all of src's components
-        // For removing components: src should contain all of dst's components
-        const intersection = self.mask.intersectWith(dst.mask);
-        assert(intersection.eql(self.mask) or intersection.eql(dst.mask));
-        const src_index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-
-        // ensure capacity of target arch
-        if (dst.len >= dst.capacity) {
-            try dst.setCapacity(gpa, dst.capacity + dst.chunk_size);
+        pub inline fn getSingleConst(self: *Self, flags: *HeapFlagSet(FlagInt), entity: Entity, comptime C: type) EcsError!*const C {
+            const index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const flag = flags.getFlag(C);
+            const meta = self.getMeta(flag).?;
+            return @ptrCast(@alignCast(self.getSingleRawConst(index, meta)));
         }
 
-        const dst_index = try dst.putEntity(gpa, entity);
-        var skipped: u32 = 0;
-        for (self.columns.items) |*meta| {
-            const data = self.getSingleRawConst(src_index, meta);
-            const info = self.getTickInfo(src_index, meta);
-
-            const dst_meta = dst.getMeta(meta.flag) orelse {
-                skipped += 1;
-                continue;
-            };
-
-            dst.putRaw(info.changed, info.added, dst_index, dst_meta, data);
+        pub inline fn getTickInfo(self: *Self, index: usize, meta: *const ColMeta) *const TickInfo {
+            assert(self.len > index);
+            const tick_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
+            return @ptrCast(@alignCast(self.bytes[tick_offset .. tick_offset + @sizeOf(TickInfo)]));
         }
 
-        // generally there should only be one comp missing from the target
-        assert(skipped < 2);
-
-        try self.remove(gpa, entity);
-    }
-
-    inline fn swapRemoveComp(self: *Self, index: usize, meta: *ColMeta) void {
-        assert(self.len > 0);
-
-        const remove_offset = meta.offset + meta.size * index;
-        const last_offset = meta.offset + meta.size * (self.len - 1);
-        const tick_remove_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
-        const tick_last_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * (self.len - 1);
-
-        @memcpy(
-            self.bytes[remove_offset .. remove_offset + meta.size],
-            self.bytes[last_offset .. last_offset + meta.size],
-        );
-
-        @memcpy(
-            self.bytes[tick_remove_offset .. tick_remove_offset + @sizeOf(TickInfo)],
-            self.bytes[tick_last_offset .. tick_last_offset + @sizeOf(TickInfo)],
-        );
-    }
-
-    inline fn swapRemoveEntitiy(self: *Self, index: usize) void {
-        assert(self.len > 0);
-
-        const ent_size = @sizeOf(Entity);
-        const remove_offset = ent_size * index;
-        const last_offset = ent_size * (self.len - 1);
-
-        @memcpy(
-            self.bytes[remove_offset .. remove_offset + ent_size],
-            self.bytes[last_offset .. last_offset + ent_size],
-        );
-    }
-
-    pub fn cloneEmpty(self: *const Self, gpa: std.mem.Allocator) !Self {
-        var clone = Self{};
-        clone.bytes = undefined;
-        clone.mask = self.mask;
-        clone.alignment = self.alignment;
-        clone.column_lookup = try self.column_lookup.clone(gpa);
-        clone.columns = try self.columns.clone(gpa);
-        clone.chunk_size = self.chunk_size;
-        return clone;
-    }
-
-    /// Query struct by index with tick filter
-    pub fn getFilteredIndex(
-        self: *Self,
-        tick: u32,
-        index: usize,
-        comptime Q: type,
-        comptime filter: anytype,
-    ) EcsError!Q {
-        inline for (filter) |comp| {
-            if (@hasDecl(comp, "_is_changed")) {
-                const flag = CompFlag.getFlag(comp.inner);
-                const meta = self.getMeta(flag).?;
-                const info = self.getTickInfo(index, meta);
-                if (info.changed < tick -| 1) return EcsError.EntityNotFound;
-            }
-            if (@hasDecl(comp, "_is_added")) {
-                const flag = CompFlag.getFlag(comp.inner);
-                const meta = self.getMeta(flag).?;
-                const info = self.getTickInfo(index, meta);
-                if (info.added < tick -| 1) return EcsError.EntityNotFound;
-            }
+        pub inline fn getMeta(self: *Self, flag: CompFlag) ?*const ColMeta {
+            const index = self.column_lookup.get(flag) orelse return null;
+            return &self.columns.items[index];
         }
 
-        return self.getQueryIndex(index, Q);
-    }
+        pub fn moveTo(
+            self: *Self,
+            gpa: std.mem.Allocator,
+            flags: *HeapFlagSet(FlagInt),
+            entity: Entity,
+            dst: *Self,
+        ) !void {
+            assert(@intFromPtr(self) != @intFromPtr(dst));
+            assert(dst.capacity >= dst.len);
 
-    /// Query struct by index
-    pub fn getQueryIndex(self: *Self, index: usize, comptime Q: type) EcsError!Q {
-        var row: Q = undefined;
-        const info = @typeInfo(Q).@"struct";
+            // For adding components: dst should contain all of src's components
+            // For removing components: src should contain all of dst's components
+            const intersection = self.mask.intersectWith(dst.mask);
+            assert(intersection.eql(self.mask) or intersection.eql(dst.mask));
+            const src_index = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
 
-        inline for (info.fields) |field| {
-            // entity
-            if (field.type == Entity) {
-                @field(row, field.name) = self.getEntity(index);
-                continue;
-            }
-            // skip tags
-            if (@sizeOf(field.type) == 0) {
-                @field(row, field.name) = .{};
-                continue;
+            // ensure capacity of target arch
+            if (dst.len >= dst.capacity) {
+                try dst.setCapacity(gpa, flags, dst.capacity + dst.chunk_size);
             }
 
-            const field_ptr = switch (@typeInfo(field.type)) {
-                .pointer => @typeInfo(field.type).pointer,
-                .optional => |opt| @typeInfo(opt.child).pointer,
-                else => @compileError("Type not allowed: " ++ field.name),
-            };
+            const dst_index = try dst.putEntity(gpa, entity);
+            var skipped: u32 = 0;
+            for (self.columns.items) |*meta| {
+                const data = self.getSingleRawConst(src_index, meta);
+                const info = self.getTickInfo(src_index, meta);
 
-            const flag = CompFlag.getFlag(field_ptr.child);
-            if (self.getMeta(flag)) |meta| {
-                if (field_ptr.is_const) {
-                    const raw_bytes = self.getSingleRawConst(index, meta);
-                    @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
-                } else {
-                    const raw_bytes = self.getSingleRaw(index, meta);
-                    @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
+                const dst_meta = dst.getMeta(meta.flag) orelse {
+                    skipped += 1;
+                    continue;
+                };
+
+                dst.putRaw(info.changed, info.added, dst_index, dst_meta, data);
+            }
+
+            // generally there should only be one comp missing from the target
+            assert(skipped < 2);
+
+            try self.remove(gpa, entity);
+        }
+
+        inline fn swapRemoveComp(self: *Self, index: usize, meta: *ColMeta) void {
+            assert(self.len > 0);
+
+            const remove_offset = meta.offset + meta.size * index;
+            const last_offset = meta.offset + meta.size * (self.len - 1);
+            const tick_remove_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * index;
+            const tick_last_offset = meta.offset + meta.size * self.capacity + @sizeOf(TickInfo) * (self.len - 1);
+
+            @memcpy(
+                self.bytes[remove_offset .. remove_offset + meta.size],
+                self.bytes[last_offset .. last_offset + meta.size],
+            );
+
+            @memcpy(
+                self.bytes[tick_remove_offset .. tick_remove_offset + @sizeOf(TickInfo)],
+                self.bytes[tick_last_offset .. tick_last_offset + @sizeOf(TickInfo)],
+            );
+        }
+
+        inline fn swapRemoveEntitiy(self: *Self, index: usize) void {
+            assert(self.len > 0);
+
+            const ent_size = @sizeOf(Entity);
+            const remove_offset = ent_size * index;
+            const last_offset = ent_size * (self.len - 1);
+
+            @memcpy(
+                self.bytes[remove_offset .. remove_offset + ent_size],
+                self.bytes[last_offset .. last_offset + ent_size],
+            );
+        }
+
+        pub fn cloneEmpty(self: *const Self, gpa: std.mem.Allocator) !Self {
+            var clone = Self{};
+            clone.bytes = undefined;
+            clone.mask = self.mask;
+            clone.alignment = self.alignment;
+            clone.column_lookup = try self.column_lookup.clone(gpa);
+            clone.columns = try self.columns.clone(gpa);
+            clone.chunk_size = self.chunk_size;
+            return clone;
+        }
+
+        /// Query struct by index with tick filter
+        pub fn getFilteredIndex(
+            self: *Self,
+            flags: *HeapFlagSet(FlagInt),
+            tick: u32,
+            index: usize,
+            comptime Q: type,
+            comptime filter: anytype,
+        ) EcsError!Q {
+            inline for (filter) |comp| {
+                if (@hasDecl(comp, "_is_changed")) {
+                    const flag = flags.getFlag(comp.inner);
+                    const meta = self.getMeta(flag).?;
+                    const info = self.getTickInfo(index, meta);
+                    if (info.changed < tick -| 1) return EcsError.EntityNotFound;
                 }
-            } else {
-                if (@typeInfo(field.type) == .optional) {
-                    @field(row, field.name) = null;
-                } else {
-                    return EcsError.ComponentNotFound;
+                if (@hasDecl(comp, "_is_added")) {
+                    const flag = flags.getFlag(comp.inner);
+                    const meta = self.getMeta(flag).?;
+                    const info = self.getTickInfo(index, meta);
+                    if (info.added < tick -| 1) return EcsError.EntityNotFound;
                 }
             }
+
+            return self.getQueryIndex(flags, index, Q);
         }
 
-        return row;
-    }
+        /// Query struct by index
+        pub fn getQueryIndex(self: *Self, flags: *HeapFlagSet(FlagInt), index: usize, comptime Q: type) EcsError!Q {
+            var row: Q = undefined;
+            const info = @typeInfo(Q).@"struct";
 
-    /// calc table offsets per comp
-    inline fn calcTableOffsets(self: *Self) void {
-        assert(self.len == 0);
-        // Ensure entity section is aligned to the maximum component alignment
-        var offset = std.mem.alignForward(usize, @sizeOf(Entity) * self.capacity, self.alignment);
-        for (self.columns.items) |*meta| {
-            const typeId = meta.flag.getId();
-            offset = std.mem.alignForward(usize, offset, typeId.alignment);
-            meta.offset = offset;
-            offset += meta.size * self.capacity + @sizeOf(TickInfo) * self.capacity;
+            inline for (info.fields) |field| {
+                // entity
+                if (field.type == Entity) {
+                    @field(row, field.name) = self.getEntity(index);
+                    continue;
+                }
+                // skip tags
+                if (@sizeOf(field.type) == 0) {
+                    @field(row, field.name) = .{};
+                    continue;
+                }
+
+                const field_ptr = switch (@typeInfo(field.type)) {
+                    .pointer => @typeInfo(field.type).pointer,
+                    .optional => |opt| @typeInfo(opt.child).pointer,
+                    else => @compileError("Type not allowed: " ++ field.name),
+                };
+
+                const flag = flags.getFlag(field_ptr.child);
+                if (self.getMeta(flag)) |meta| {
+                    if (field_ptr.is_const) {
+                        const raw_bytes = self.getSingleRawConst(index, meta);
+                        @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
+                    } else {
+                        const raw_bytes = self.getSingleRaw(index, meta);
+                        @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
+                    }
+                } else {
+                    if (@typeInfo(field.type) == .optional) {
+                        @field(row, field.name) = null;
+                    } else {
+                        return EcsError.ComponentNotFound;
+                    }
+                }
+            }
+
+            return row;
         }
-    }
 
-    /// realloc memory to new capacity
-    /// new capaicty > current or crash
-    pub fn setCapacity(self: *Self, gpa: std.mem.Allocator, new_capacity: usize) !void {
-        assert(new_capacity >= self.len);
-        // new size
-        var size = std.mem.alignForward(usize, @sizeOf(Entity) * new_capacity, self.alignment);
-        var offset = size;
-        for (self.columns.items) |meta| {
-            const typeId = meta.flag.getId();
-            offset = std.mem.alignForward(usize, offset, typeId.alignment);
-            offset += meta.size * new_capacity + @sizeOf(TickInfo) * new_capacity;
+        /// calc table offsets per comp
+        inline fn calcTableOffsets(self: *Self, flags: *HeapFlagSet(FlagInt)) void {
+            assert(self.len == 0);
+            // Ensure entity section is aligned to the maximum component alignment
+            var offset = std.mem.alignForward(usize, @sizeOf(Entity) * self.capacity, self.alignment);
+            for (self.columns.items) |*meta| {
+                const typeId = flags.getId(meta.flag);
+                offset = std.mem.alignForward(usize, offset, typeId.alignment);
+                meta.offset = offset;
+                offset += meta.size * self.capacity + @sizeOf(TickInfo) * self.capacity;
+            }
         }
-        size = offset;
 
-        const new_bytes = (gpa.rawAlloc(
-            size,
-            std.mem.Alignment.fromByteUnits(self.alignment),
-            @returnAddress(),
-        ) orelse return error.OutOfMemory)[0..size];
+        /// realloc memory to new capacity
+        /// new capaicty > current or crash
+        pub fn setCapacity(self: *Self, gpa: std.mem.Allocator, flags: *HeapFlagSet(FlagInt), new_capacity: usize) !void {
+            assert(new_capacity >= self.len);
+            // new size
+            var size = std.mem.alignForward(usize, @sizeOf(Entity) * new_capacity, self.alignment);
+            var offset = size;
+            for (self.columns.items) |meta| {
+                const typeId = flags.getId(meta.flag);
+                offset = std.mem.alignForward(usize, offset, typeId.alignment);
+                offset += meta.size * new_capacity + @sizeOf(TickInfo) * new_capacity;
+            }
+            size = offset;
 
-        if (self.capacity == 0) {
+            const new_bytes = (gpa.rawAlloc(
+                size,
+                std.mem.Alignment.fromByteUnits(self.alignment),
+                @returnAddress(),
+            ) orelse return error.OutOfMemory)[0..size];
+
+            if (self.capacity == 0) {
+                self.bytes = new_bytes;
+                self.capacity = new_capacity;
+                self.calcTableOffsets(flags);
+                return;
+            }
+
+            // copy entities
+            const entity_size = @sizeOf(Entity) * self.len;
+            @memcpy(new_bytes[0..entity_size], self.bytes[0..entity_size]);
+
+            // offset to comp table
+            var new_offset = std.mem.alignForward(usize, @sizeOf(Entity) * new_capacity, self.alignment);
+
+            for (self.columns.items) |*meta| {
+                // Align new offset
+                const typeId = flags.getId(meta.flag);
+                new_offset = std.mem.alignForward(usize, new_offset, typeId.alignment);
+
+                // Copy component data
+                const old_comp_offset = meta.offset;
+                const copy_size = meta.size * self.len;
+                @memcpy(
+                    new_bytes[new_offset .. new_offset + copy_size],
+                    self.bytes[old_comp_offset .. old_comp_offset + copy_size],
+                );
+
+                meta.offset = new_offset;
+
+                // Move to tick section (both old and new)
+                const old_tick_offset = old_comp_offset + meta.size * self.capacity;
+                new_offset += meta.size * new_capacity;
+
+                const tick_size = @sizeOf(TickInfo) * self.len;
+                @memcpy(
+                    new_bytes[new_offset .. new_offset + tick_size],
+                    self.bytes[old_tick_offset .. old_tick_offset + tick_size],
+                );
+
+                new_offset += @sizeOf(TickInfo) * new_capacity;
+            }
+
+            gpa.free(self.bytes);
             self.bytes = new_bytes;
             self.capacity = new_capacity;
-            self.calcTableOffsets();
-            return;
         }
-
-        // copy entities
-        const entity_size = @sizeOf(Entity) * self.len;
-        @memcpy(new_bytes[0..entity_size], self.bytes[0..entity_size]);
-
-        // offset to comp table
-        var new_offset = std.mem.alignForward(usize, @sizeOf(Entity) * new_capacity, self.alignment);
-
-        for (self.columns.items) |*meta| {
-            // Align new offset
-            const typeId = meta.flag.getId();
-            new_offset = std.mem.alignForward(usize, new_offset, typeId.alignment);
-
-            // Copy component data
-            const old_comp_offset = meta.offset;
-            const copy_size = meta.size * self.len;
-            @memcpy(
-                new_bytes[new_offset .. new_offset + copy_size],
-                self.bytes[old_comp_offset .. old_comp_offset + copy_size],
-            );
-
-            meta.offset = new_offset;
-
-            // Move to tick section (both old and new)
-            const old_tick_offset = old_comp_offset + meta.size * self.capacity;
-            new_offset += meta.size * new_capacity;
-
-            const tick_size = @sizeOf(TickInfo) * self.len;
-            @memcpy(
-                new_bytes[new_offset .. new_offset + tick_size],
-                self.bytes[old_tick_offset .. old_tick_offset + tick_size],
-            );
-
-            new_offset += @sizeOf(TickInfo) * new_capacity;
-        }
-
-        gpa.free(self.bytes);
-        self.bytes = new_bytes;
-        self.capacity = new_capacity;
-    }
-};
+    };
+}
 
 // *************************************************
 // Arch Registry
 // *************************************************
-pub const ComponentRegistry = struct {
-    // --------------------------- TODO: group these
-    // const EntityMeta = struct { arch_id: usize, mask: Co };
-    /// entity -> mask
-    mask_lookup: std.AutoHashMapUnmanaged(Entity, CompFlag.Set) = .{},
-    /// entity -> arch id
-    entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
-    /// group mask -> arch id
-    archtypes_lookup: std.AutoHashMapUnmanaged(CompFlag.Set, usize) = .{},
-    archtypes: std.ArrayList(ArchType) = .{},
-    const Self = @This();
-    const CHUNK_SIZE: usize = 64;
+fn ComponentRegistry(FlagInt: type) type {
+    return struct {
+        component_flags: HeapFlagSet(FlagInt) = .{},
+        // --------------------------- TODO: group these
+        // const EntityMeta = struct { arch_id: usize, mask: Co };
+        /// entity -> mask
+        mask_lookup: std.AutoHashMapUnmanaged(Entity, HeapFlagSet(FlagInt).Set) = .{},
+        /// entity -> arch id
+        entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
+        /// group mask -> arch id
+        archtypes_lookup: std.AutoHashMapUnmanaged(HeapFlagSet(FlagInt).Set, usize) = .{},
+        archtypes: std.ArrayList(ArchType(FlagInt)) = .{},
 
-    pub fn getOrPutMask(self: *Self, gpa: std.mem.Allocator, entity: Entity) !*CompFlag.Set {
-        const res = try self.mask_lookup.getOrPut(gpa, entity);
-        if (!res.found_existing) {
-            res.value_ptr.* = CompFlag.Set.initEmpty();
-        }
-        return res.value_ptr;
-    }
+        const FlagSet = HeapFlagSet(FlagInt);
+        const CompFlag = FlagSet.Flag;
 
-    pub fn add(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, comp: anytype) !void {
-        const CompType = @TypeOf(comp);
-        const flag = CompFlag.getFlag(CompType);
+        const Self = @This();
+        const CHUNK_SIZE: usize = 64;
 
-        var mask = try self.getOrPutMask(allocator, entity);
-        const current_arch_id = self.archtypes_lookup.get(mask.*);
-
-        if (mask.contains(flag)) {
-            const arch = &self.archtypes.items[current_arch_id.?];
-            try arch.put(allocator, tick, entity, .{comp});
-            return;
-        }
-
-        mask.insert(flag);
-
-        // add to new
-        const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
-        if (!new_arch_id.found_existing) {
-            // create
-            if (current_arch_id) |current_id| {
-                const cloned = try self.archtypes.items[current_id].cloneEmpty(allocator);
-                try self.archtypes.append(allocator, cloned);
-                new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
-            } else {
-                try self.archtypes.append(allocator, .{ .chunk_size = CHUNK_SIZE });
-                new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+        pub fn getOrPutMask(self: *Self, gpa: std.mem.Allocator, entity: Entity) !*HeapFlagSet(FlagInt).Set {
+            const res = try self.mask_lookup.getOrPut(gpa, entity);
+            if (!res.found_existing) {
+                res.value_ptr.* = HeapFlagSet(FlagInt).Set.initEmpty();
             }
-
-            // add new comp
-            try self.archtypes.items[new_arch_id.value_ptr.*].addComp(allocator, flag);
-            try self.archtypes.items[new_arch_id.value_ptr.*].setCapacity(allocator, CHUNK_SIZE);
+            return res.value_ptr;
         }
 
-        if (current_arch_id) |current_id| {
-            try self.archtypes.items[current_id].moveTo(
-                allocator,
-                entity,
-                &self.archtypes.items[new_arch_id.value_ptr.*],
-            );
-            try self.archtypes.items[new_arch_id.value_ptr.*].putSingle(allocator, tick, entity, comp);
-        } else {
-            try self.archtypes.items[new_arch_id.value_ptr.*].put(allocator, tick, entity, .{comp});
-        }
-
-        try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
-    }
-
-    pub fn addBundle(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, bundle: anytype) !void {
-        var mask = try self.getOrPutMask(allocator, entity);
-
-        const current_arch_id = self.archtypes_lookup.get(mask.*);
-        const is_new_entity = current_arch_id == null;
-
-        const old_mask = mask.*;
-        inline for (bundle) |comp| {
+        pub fn add(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, comp: anytype) !void {
             const CompType = @TypeOf(comp);
-            if (isTuple(CompType)) continue;
+            const flag = self.component_flags.getFlag(CompType);
 
-            const flag = CompFlag.getFlag(CompType);
-            mask.insert(flag);
-        }
+            var mask = try self.getOrPutMask(allocator, entity);
+            const current_arch_id = self.archtypes_lookup.get(mask.*);
 
-        const same_arch = mask.eql(old_mask);
-
-        const next_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
-        if (!next_arch_id.found_existing and !same_arch) {
-            if (is_new_entity) {
-                try self.archtypes.append(allocator, .{});
-            } else {
-                const cloned = try self.archtypes.items[current_arch_id.?].cloneEmpty(allocator);
-                try self.archtypes.append(allocator, cloned);
+            if (mask.contains(flag)) {
+                const arch = &self.archtypes.items[current_arch_id.?];
+                try arch.put(allocator, &self.component_flags, tick, entity, .{comp});
+                return;
             }
 
-            next_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+            mask.insert(flag);
 
+            // add to new
+            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
+            if (!new_arch_id.found_existing) {
+                // create
+                if (current_arch_id) |current_id| {
+                    const cloned = try self.archtypes.items[current_id].cloneEmpty(allocator);
+                    try self.archtypes.append(allocator, cloned);
+                    new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+                } else {
+                    try self.archtypes.append(allocator, .{ .chunk_size = CHUNK_SIZE });
+                    new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+                }
+
+                // add new comp
+                try self.archtypes.items[new_arch_id.value_ptr.*].addComp(allocator, &self.component_flags, flag);
+                try self.archtypes.items[new_arch_id.value_ptr.*].setCapacity(allocator, &self.component_flags, CHUNK_SIZE);
+            }
+
+            if (current_arch_id) |current_id| {
+                try self.archtypes.items[current_id].moveTo(
+                    allocator,
+                    &self.component_flags,
+                    entity,
+                    &self.archtypes.items[new_arch_id.value_ptr.*],
+                );
+                try self.archtypes.items[new_arch_id.value_ptr.*].putSingle(allocator, &self.component_flags, tick, entity, comp);
+            } else {
+                try self.archtypes.items[new_arch_id.value_ptr.*].put(allocator, &self.component_flags, tick, entity, .{comp});
+            }
+
+            try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
+        }
+
+        pub fn addBundle(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, bundle: anytype) !void {
+            var mask = try self.getOrPutMask(allocator, entity);
+
+            const current_arch_id = self.archtypes_lookup.get(mask.*);
+            const is_new_entity = current_arch_id == null;
+
+            const old_mask = mask.*;
             inline for (bundle) |comp| {
                 const CompType = @TypeOf(comp);
                 if (isTuple(CompType)) continue;
 
-                const flag = CompFlag.getFlag(CompType);
-                try self.archtypes.items[next_arch_id.value_ptr.*].addComp(allocator, flag);
+                const flag = self.component_flags.getFlag(CompType);
+                mask.insert(flag);
             }
 
-            try self.archtypes.items[next_arch_id.value_ptr.*].setCapacity(allocator, CHUNK_SIZE);
-        }
+            const same_arch = mask.eql(old_mask);
 
-        if (!is_new_entity and !same_arch) {
-            try self.archtypes.items[current_arch_id.?].moveTo(
-                allocator,
-                entity,
-                &self.archtypes.items[next_arch_id.value_ptr.*],
-            );
-        }
-
-        try self.archtypes.items[next_arch_id.value_ptr.*].put(allocator, tick, entity, bundle);
-        _ = try self.entity_lookup.put(allocator, entity, next_arch_id.value_ptr.*);
-    }
-
-    pub fn getSingle(self: *Self, entity: Entity, comptime C: type) ?*C {
-        const arch_id = self.entity_lookup.get(entity) orelse return null;
-        return self.archtypes.items[arch_id].getSingle(entity, C) catch null;
-    }
-
-    pub fn getSingleAndUpdate(self: *Self, tick: u32, entity: Entity, comptime C: type) ?*C {
-        const arch_id = self.entity_lookup.get(entity) orelse return null;
-        return self.archtypes.items[arch_id].getSingleAndUpdate(tick, entity, C) catch null;
-    }
-
-    pub fn getSingleOpaque(self: *Self, entity: Entity, flag: CompFlag) ?*anyopaque {
-        const arch_id = self.entity_lookup.get(entity) orelse return null;
-        const meta = self.archtypes.items[arch_id].getMeta(flag) orelse return null;
-        const index = self.archtypes.items[arch_id].entity_lookup.get(entity) orelse return null;
-        return self.archtypes.items[arch_id].getSingleRaw(index, meta).ptr;
-    }
-
-    pub fn remove(self: *Self, allocator: std.mem.Allocator, entity: Entity, comptime C: type) !void {
-        const flag = CompFlag.getFlag(C);
-        var mask = try self.getOrPutMask(allocator, entity);
-        const current_arch_id = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-
-        // TODO: failsafe required?
-        if (!mask.contains(flag)) return;
-        // assert(mask.contains(flag));
-
-        mask.remove(flag);
-        const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
-
-        if (!new_arch_id.found_existing) {
-            var new_arch = try self.archtypes.items[current_arch_id].cloneEmpty(allocator);
-            new_arch.removeComp(flag);
-            try new_arch.setCapacity(allocator, CHUNK_SIZE);
-            try self.archtypes.append(allocator, new_arch);
-            new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
-        }
-
-        const new_arch = &self.archtypes.items[new_arch_id.value_ptr.*];
-        try self.archtypes.items[current_arch_id].moveTo(allocator, entity, new_arch);
-        _ = try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
-    }
-
-    pub fn has(self: *const Self, entity: Entity, comptime C: type) bool {
-        const mask = self.mask_lookup.get(entity) orelse return false;
-        const flag = CompFlag.getFlag(C);
-        return mask.contains(flag);
-    }
-
-    /// TODO: deinit allocating components
-    pub fn despawn(self: *Self, allocator: std.mem.Allocator, entity: Entity) !void {
-        const arch_id = self.entity_lookup.get(entity) orelse return;
-        try self.archtypes.items[arch_id].remove(allocator, entity);
-        _ = self.entity_lookup.remove(entity);
-    }
-};
-
-pub const ArchIter = struct {
-    const Self = @This();
-    const empty = CompFlag.Set.initEmpty();
-    reg: []ArchType,
-    include: CompFlag.Set,
-    exclude: CompFlag.Set,
-    index: usize = 0,
-
-    pub fn next(self: *Self) ?*ArchType {
-        while (self.index < self.reg.len) {
-            const mask = self.reg[self.index].mask;
-            const next_arch = &self.reg[self.index];
-            self.index += 1;
-
-            if (self.include.intersectWith(mask).eql(self.include) and self.exclude.intersectWith(mask).eql(empty) and next_arch.len > 0) {
-                return next_arch;
-            }
-        }
-        return null;
-    }
-
-    pub fn reset(self: *@This()) void {
-        self.index = 0;
-    }
-};
-
-pub const EntityIter = struct {
-    const Self = @This();
-    arch_iter: ArchIter,
-    current: ?*ArchType = null,
-    offset: usize = 0,
-
-    pub fn next(self: *Self) ?Entity {
-        while (true) {
-            if (self.current) |current_arch| {
-                if (self.offset >= current_arch.len) {
-                    self.current = null;
-                    self.offset = 0;
-                    continue;
+            const next_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
+            if (!next_arch_id.found_existing and !same_arch) {
+                if (is_new_entity) {
+                    try self.archtypes.append(allocator, .{});
+                } else {
+                    const cloned = try self.archtypes.items[current_arch_id.?].cloneEmpty(allocator);
+                    try self.archtypes.append(allocator, cloned);
                 }
 
-                const next_item = current_arch.getEntity(self.offset);
-                self.offset += 1;
-                return next_item;
+                next_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+
+                inline for (bundle) |comp| {
+                    const CompType = @TypeOf(comp);
+                    if (isTuple(CompType)) continue;
+
+                    const flag = self.component_flags.getFlag(CompType);
+                    try self.archtypes.items[next_arch_id.value_ptr.*].addComp(allocator, &self.component_flags, flag);
+                }
+
+                try self.archtypes.items[next_arch_id.value_ptr.*].setCapacity(allocator, &self.component_flags, CHUNK_SIZE);
             }
 
-            self.current = self.arch_iter.next() orelse return null;
-            self.offset = 0;
-        }
-    }
-};
+            if (!is_new_entity and !same_arch) {
+                try self.archtypes.items[current_arch_id.?].moveTo(
+                    allocator,
+                    &self.component_flags,
+                    entity,
+                    &self.archtypes.items[next_arch_id.value_ptr.*],
+                );
+            }
 
-//---------------------------------------
-pub fn Qiter(max_components: comptime_int, comptime Q: type, comptime filter: anytype) type {
-    _ = max_components; // autofix
+            try self.archtypes.items[next_arch_id.value_ptr.*].put(allocator, &self.component_flags, tick, entity, bundle);
+            _ = try self.entity_lookup.put(allocator, entity, next_arch_id.value_ptr.*);
+        }
+
+        pub fn getSingle(self: *Self, entity: Entity, comptime C: type) ?*C {
+            const arch_id = self.entity_lookup.get(entity) orelse return null;
+            return self.archtypes.items[arch_id].getSingle(&self.component_flags, entity, C) catch null;
+        }
+
+        pub fn getSingleAndUpdate(self: *Self, tick: u32, entity: Entity, comptime C: type) ?*C {
+            const arch_id = self.entity_lookup.get(entity) orelse return null;
+            return self.archtypes.items[arch_id].getSingleAndUpdate(&self.component_flags, tick, entity, C) catch null;
+        }
+
+        pub fn getSingleOpaque(self: *Self, entity: Entity, flag: CompFlag) ?*anyopaque {
+            const arch_id = self.entity_lookup.get(entity) orelse return null;
+            const meta = self.archtypes.items[arch_id].getMeta(flag) orelse return null;
+            const index = self.archtypes.items[arch_id].entity_lookup.get(entity) orelse return null;
+            return self.archtypes.items[arch_id].getSingleRaw(index, meta).ptr;
+        }
+
+        pub fn remove(self: *Self, allocator: std.mem.Allocator, entity: Entity, comptime C: type) !void {
+            const flag = self.component_flags.getFlag(C);
+            var mask = try self.getOrPutMask(allocator, entity);
+            const current_arch_id = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+
+            // TODO: failsafe required?
+            if (!mask.contains(flag)) return;
+            // assert(mask.contains(flag));
+
+            mask.remove(flag);
+            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
+
+            if (!new_arch_id.found_existing) {
+                var new_arch = try self.archtypes.items[current_arch_id].cloneEmpty(allocator);
+                new_arch.removeComp(&self.component_flags, flag);
+                try new_arch.setCapacity(allocator, &self.component_flags, CHUNK_SIZE);
+                try self.archtypes.append(allocator, new_arch);
+                new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+            }
+
+            const new_arch = &self.archtypes.items[new_arch_id.value_ptr.*];
+            try self.archtypes.items[current_arch_id].moveTo(allocator, &self.component_flags, entity, new_arch);
+            _ = try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
+        }
+
+        pub fn has(self: *const Self, entity: Entity, comptime C: type) bool {
+            const mask = self.mask_lookup.get(entity) orelse return false;
+            const flag = self.component_flags.getFlag(C);
+            return mask.contains(flag);
+        }
+
+        /// TODO: deinit allocating components
+        pub fn despawn(self: *Self, allocator: std.mem.Allocator, entity: Entity) !void {
+            const arch_id = self.entity_lookup.get(entity) orelse return;
+            try self.archtypes.items[arch_id].remove(allocator, entity);
+            _ = self.entity_lookup.remove(entity);
+        }
+    };
+}
+
+fn ArchIter(FlagInt: type) type {
     return struct {
         const Self = @This();
-        arch_iter: ArchIter,
-        current: ?*ArchType = null,
+        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        reg: []ArchType(FlagInt),
+        include: HeapFlagSet(FlagInt).Set,
+        exclude: HeapFlagSet(FlagInt).Set,
+        index: usize = 0,
+
+        pub fn next(self: *Self) ?*ArchType(FlagInt) {
+            while (self.index < self.reg.len) {
+                const mask = self.reg[self.index].mask;
+                const next_arch = &self.reg[self.index];
+                self.index += 1;
+
+                if (self.include.intersectWith(mask).eql(self.include) and self.exclude.intersectWith(mask).eql(empty) and next_arch.len > 0) {
+                    return next_arch;
+                }
+            }
+            return null;
+        }
+
+        pub fn reset(self: *@This()) void {
+            self.index = 0;
+        }
+    };
+}
+
+fn EntityIter(FlagInt: type) type {
+    return struct {
+        const Self = @This();
+        arch_iter: ArchIter(FlagInt),
+        current: ?*ArchType(FlagInt) = null,
+        offset: usize = 0,
+
+        pub fn next(self: *Self) ?Entity {
+            while (true) {
+                if (self.current) |current_arch| {
+                    if (self.offset >= current_arch.len) {
+                        self.current = null;
+                        self.offset = 0;
+                        continue;
+                    }
+
+                    const next_item = current_arch.getEntity(self.offset);
+                    self.offset += 1;
+                    return next_item;
+                }
+
+                self.current = self.arch_iter.next() orelse return null;
+                self.offset = 0;
+            }
+        }
+    };
+}
+
+//---------------------------------------
+pub fn Qiter(comptime FlagInt: type, comptime Q: type, comptime filter: anytype) type {
+    return struct {
+        const Self = @This();
+        flags: *HeapFlagSet(FlagInt),
+        arch_iter: ArchIter(FlagInt),
+        current: ?*ArchType(FlagInt) = null,
         offset: usize = 0,
         world_tick: u32,
 
@@ -2322,7 +2285,7 @@ pub fn Qiter(max_components: comptime_int, comptime Q: type, comptime filter: an
                         continue;
                     }
 
-                    const next_item = current_arch.getFilteredIndex(self.world_tick, self.offset, Q, filter) catch {
+                    const next_item = current_arch.getFilteredIndex(self.flags, self.world_tick, self.offset, Q, filter) catch {
                         self.offset += 1;
                         continue;
                     };
@@ -2403,51 +2366,53 @@ pub fn Citer(comptime C: type, comptime mut: bool, filter: anytype) type {
     };
 }
 
-const QueryMask = struct {
-    read_set: CompFlag.Set = .{},
-    write_set: CompFlag.Set = .{},
-    include_set: CompFlag.Set = .{},
-    exclude_set: CompFlag.Set = .{},
-};
+fn QueryMask(FlagType: type) type {
+    return struct {
+        read_set: HeapFlagSet(FlagType).Set = .{},
+        write_set: HeapFlagSet(FlagType).Set = .{},
+        include_set: HeapFlagSet(FlagType).Set = .{},
+        exclude_set: HeapFlagSet(FlagType).Set = .{},
+    };
+}
 
-fn extractQuerySets(comptime query: anytype, comptime filter: anytype) QueryMask {
+fn extractQuerySets(comptime desc: AppDesc, world: *App(desc), comptime query: anytype, comptime filter: anytype) QueryMask(desc.FlagInt) {
     // if (!@inComptime()) @compileError("comptime only!");
-    var set: QueryMask = .{};
+    var set: QueryMask(desc.FlagInt) = .{};
     inline for (query) |comp| {
         const info = @typeInfo(comp);
         switch (info) {
             .optional => |opt| {
                 if (@hasDecl(opt.child, "_is_mut")) {
-                    const comp_id = CompFlag.getFlag(opt.child.inner);
+                    const comp_id = world.components.component_flags.getFlag(opt.child.inner);
                     set.write_set.insert(comp_id);
                     set.read_set.insert(comp_id);
                 } else {
-                    const comp_id = CompFlag.getFlag(opt.child);
+                    const comp_id = world.components.component_flags.getFlag(opt.child);
                     set.read_set.insert(comp_id);
                 }
             },
             .@"struct" => |str| {
                 if (str.is_tuple) @compileLog("query tuple not allowed");
                 if (@hasDecl(comp, "_is_mut")) {
-                    const comp_id = CompFlag.getFlag(comp.inner);
+                    const comp_id = world.components.component_flags.getFlag(comp.inner);
                     set.read_set.insert(comp_id);
                     set.write_set.insert(comp_id);
                     set.include_set.insert(comp_id);
                     continue;
                 } else {
-                    const comp_id = CompFlag.getFlag(comp);
+                    const comp_id = world.components.component_flags.getFlag(comp);
                     set.include_set.insert(comp_id);
                     set.read_set.insert(comp_id);
                 }
             },
             .@"enum" => {
-                const comp_id = CompFlag.getFlag(comp);
+                const comp_id = world.components.component_flags.getFlag(comp);
                 set.include_set.insert(comp_id);
                 set.read_set.insert(comp_id);
             },
 
             .@"union" => {
-                const comp_id = CompFlag.getFlag(comp);
+                const comp_id = world.components.component_flags.getFlag(comp);
                 set.include_set.insert(comp_id);
                 set.read_set.insert(comp_id);
             },
@@ -2457,12 +2422,57 @@ fn extractQuerySets(comptime query: anytype, comptime filter: anytype) QueryMask
 
     inline for (filter) |comp| {
         if (@hasDecl(comp, "_is_with") or @hasDecl(comp, "_is_changed") or @hasDecl(comp, "_is_added")) {
-            const flag = CompFlag.getFlag(comp.inner);
+            const flag = world.components.component_flags.getFlag(comp.inner);
             set.include_set.insert(flag);
             set.read_set.insert(flag);
         }
         if (@hasDecl(comp, "_is_without")) {
-            const flag = CompFlag.getFlag(comp.inner);
+            const flag = world.components.component_flags.getFlag(comp.inner);
+            set.exclude_set.insert(flag);
+        }
+    }
+
+    return set;
+}
+
+fn extractQuerySetsFromEntry(comptime desc: AppDesc, world: *App(desc), comptime entry: type, comptime filter: anytype) QueryMask(desc.FlagInt) {
+    // if (!@inComptime()) @compileError("comptime only!");
+    var set: QueryMask(desc.FlagInt) = .{};
+    const Info = @typeInfo(entry);
+
+    inline for (Info.@"struct".fields) |field| {
+        const FieldInfo = @typeInfo(field.type);
+        switch (FieldInfo) {
+            .optional => |opt| {
+                const ChildInfo = @typeInfo(opt.child);
+                switch (ChildInfo) {
+                    .pointer => |ptr| {
+                        const comp_id = world.components.component_flags.getFlag(ptr.child);
+                        set.read_set.insert(comp_id);
+                        if (!ptr.is_const) set.write_set.insert(comp_id);
+                    },
+                    else => @compileError("not allowed in query entry " ++ @typeName(opt.child)),
+                }
+            },
+            .pointer => |ptr| {
+                const comp_id = world.components.component_flags.getFlag(ptr.child);
+                set.read_set.insert(comp_id);
+                if (!ptr.is_const) set.write_set.insert(comp_id);
+            },
+            .@"struct" => {}, // skip for now
+            .@"enum" => {}, // entity
+            else => @compileError("not allowed in query entry " ++ @typeName(field.type)),
+        }
+    }
+
+    inline for (filter) |comp| {
+        if (@hasDecl(comp, "_is_with") or @hasDecl(comp, "_is_changed") or @hasDecl(comp, "_is_added")) {
+            const flag = world.components.component_flags.getFlag(comp.inner);
+            set.include_set.insert(flag);
+            set.read_set.insert(flag);
+        }
+        if (@hasDecl(comp, "_is_without")) {
+            const flag = world.components.component_flags.getFlag(comp.inner);
             set.exclude_set.insert(flag);
         }
     }
@@ -2504,12 +2514,54 @@ fn IsWrite(comptime T: type, comptime query: anytype) bool {
     return found;
 }
 
+pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime query_struct: type, comptime filter: anytype) type {
+    return struct {
+        const Self = @This();
+        const FlagSet = HeapFlagSet(desc.FlagInt);
+
+        exclude: FlagSet.Set,
+        include: FlagSet.Set,
+        reg: *ComponentRegistry(desc.FlagInt),
+        world_tick: u32,
+
+        pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
+            const set = extractQuerySetsFromEntry(desc, world, query_struct, filter);
+            access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
+            access.comp_write = access.comp_write.unionWith(set.write_set);
+        }
+
+        pub fn iter(self: *const Self) Qiter(desc.FlagInt, query_struct, filter) {
+            return Qiter(desc.FlagInt, query_struct, filter){
+                .world_tick = self.world_tick,
+                .flags = &self.reg.component_flags,
+                .arch_iter = ArchIter(desc.FlagInt){
+                    .include = self.include,
+                    .exclude = self.exclude,
+                    .reg = self.reg.archtypes.items,
+                },
+            };
+        }
+
+        pub fn fromWorld(world: *App(desc)) EcsError!Self {
+            const set = extractQuerySetsFromEntry(desc, world, query_struct, filter);
+            return Self{
+                .exclude = set.exclude_set,
+                .include = set.include_set,
+                .reg = &world.components,
+                .world_tick = world.world_tick,
+            };
+        }
+    };
+}
+
 pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime filter: anytype) type {
     return struct {
         const Self = @This();
-        exclude: CompFlag.Set,
-        include: CompFlag.Set,
-        reg: *ComponentRegistry,
+        const FlagSet = HeapFlagSet(desc.FlagInt);
+
+        exclude: FlagSet.Set,
+        include: FlagSet.Set,
+        reg: *ComponentRegistry(desc.FlagInt),
         world_tick: u32,
 
         inline fn SelfValidate() void {
@@ -2551,19 +2603,20 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             }
         }
 
-        pub fn addAccess(access: *Access) void {
-            const set = extractQuerySets(query, filter);
+        pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
+            const set = extractQuerySets(desc, world, query, filter);
             access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
             access.comp_write = access.comp_write.unionWith(set.write_set);
         }
 
         /// query iterate, expects a struct of component references
         /// Example: `var itr = query.iterQ(struct{entity: kn.Entity, my_comp: *const MyComp});`
-        pub fn iterQ(self: *const Self, comptime Q: type) Qiter(desc.max_components, Q, filter) {
+        pub fn iterQ(self: *const Self, comptime Q: type) Qiter(desc.FlagInt, Q, filter) {
             comptime validate_query(Q);
-            return Qiter(desc.max_components, Q, filter){
+            return Qiter(desc.FlagInt, Q, filter){
                 .world_tick = self.world_tick,
-                .arch_iter = ArchIter{
+                .flags = &self.reg.component_flags,
+                .arch_iter = ArchIter(desc.FlagInt){
                     .include = self.include,
                     .exclude = self.exclude,
                     .reg = self.reg.archtypes.items,
@@ -2577,7 +2630,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             comptime validate_query(struct { c: *C });
             return Citer(C, true, filter){
                 .world_tick = self.world_tick,
-                .arch_iter = ArchIter{
+                .arch_iter = ArchIter(desc.FlagInt){
                     .include = self.include,
                     .exclude = self.exclude,
                     .reg = self.reg.archtypes.items,
@@ -2591,7 +2644,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             comptime validate_query(struct { c: *const C });
             return Citer(C, false, filter){
                 .world_tick = self.world_tick,
-                .arch_iter = ArchIter{
+                .arch_iter = ArchIter(desc.FlagInt){
                     .include = self.include,
                     .exclude = self.exclude,
                     .reg = self.reg.archtypes.items,
@@ -2628,9 +2681,9 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
         }
 
         /// iterator over the entites
-        pub fn iterEntity(self: *const Self) EntityIter {
-            return EntityIter{
-                .arch_iter = ArchIter{
+        pub fn iterEntity(self: *const Self) EntityIter(desc.FlagInt) {
+            return EntityIter(desc.FlagInt){
+                .arch_iter = ArchIter(desc.FlagInt){
                     .include = self.include,
                     .exclude = self.exclude,
                     .reg = self.reg.archtypes.items,
@@ -2640,7 +2693,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
 
         /// totoal entity count for query
         pub fn count(self: *const Self) usize {
-            var iter = ArchIter{
+            var iter = ArchIter(desc.FlagInt){
                 .include = self.include,
                 .exclude = self.exclude,
                 .reg = self.reg.archtypes.items,
@@ -2666,7 +2719,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
             const arch = &self.reg.archtypes.items[arch_id];
             const index = arch.entity_lookup.get(entity).?;
-            return arch.getFilteredIndex(self.world_tick, index, Q, filter);
+            return arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, Q, filter);
         }
 
         /// get component entry single
@@ -2676,7 +2729,7 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
             const arch = &self.reg.archtypes.items[arch_id];
             const index = arch.entity_lookup.get(entity).?;
-            const entry = try arch.getFilteredIndex(self.world_tick, index, Query, filter);
+            const entry = try arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, Query, filter);
             return entry.c;
         }
 
@@ -2687,12 +2740,12 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
             const arch = &self.reg.archtypes.items[arch_id];
             const index = arch.entity_lookup.get(entity).?;
-            const entry = try arch.getFilteredIndex(self.world_tick, index, Query, filter);
+            const entry = try arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, Query, filter);
             return entry.c;
         }
 
         pub fn fromWorld(world: *App(desc)) EcsError!Self {
-            const set = extractQuerySets(query, filter);
+            const set = extractQuerySets(desc, world, query, filter);
             return Self{
                 .exclude = set.exclude_set,
                 .include = set.include_set,
@@ -2705,8 +2758,8 @@ pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime 
         pub fn empty(world: *App(desc)) Self {
             return Self{
                 .reg = &world.components,
-                .exclude = CompFlag.Set.initEmpty(),
-                .include = CompFlag.Set.initEmpty(),
+                .exclude = HeapFlagSet(desc.FlagInt).Set.initEmpty(),
+                .include = HeapFlagSet(desc.FlagInt).Set.initEmpty(),
                 .world_tick = world.world_tick,
             };
         }
@@ -2760,7 +2813,7 @@ pub fn Executor(comptime cfg: Config) type {
 
         pub fn start(self: *Self) !void {
             self.running.store(true, .monotonic);
-            if (builtin.single_threaded) return;
+            if (builtin.single_threaded or cfg.max_threads == 1) return;
 
             for (self.threads[0..cfg.max_threads]) |*slot| {
                 if (Thread.spawn(.{}, worker, .{self})) |thread| {
@@ -2830,7 +2883,7 @@ pub fn Executor(comptime cfg: Config) type {
                 }
             };
 
-            if (builtin.single_threaded) {
+            if (builtin.single_threaded or cfg.max_threads == 1) {
                 @call(.auto, func, args);
                 group.finish();
                 return;
@@ -2861,49 +2914,50 @@ pub fn Executor(comptime cfg: Config) type {
 
 pub fn HookRegistry(desc: AppDesc) type {
     return struct {
+        has_add_hook: FlagSet.Set = .{},
+        has_remove_hook: FlagSet.Set = .{},
+        has_despawn_hook: FlagSet.Set = .{},
+        // --------------------
+        add_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .{},
+        remove_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .{},
+        despawn_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .{},
+
         const Self = @This();
         const World = App(desc);
+        const FlagSet = HeapFlagSet(desc.FlagInt);
         pub const HookFn = *const fn (*anyopaque, Entity, *World) EcsError!void;
-        pub const Hook = struct {
-            run: HookFn,
-        };
-        has_add_hook: CompFlag.Set = .{},
-        has_remove_hook: CompFlag.Set = .{},
-        has_despawn_hook: CompFlag.Set = .{},
-        // --------------------
-        add_hooks: std.AutoHashMapUnmanaged(CompFlag, std.ArrayList(Hook)) = .{},
-        remove_hooks: std.AutoHashMapUnmanaged(CompFlag, std.ArrayList(Hook)) = .{},
-        despawn_hooks: std.AutoHashMapUnmanaged(CompFlag, std.ArrayList(Hook)) = .{},
+        pub const Hook = struct { run: HookFn };
 
-        pub fn runAddedHook(self: *Self, flag: CompFlag, comp: *anyopaque, entity: Entity, world: *World) !void {
+        pub fn runAddedHook(self: *Self, flag: FlagSet.Flag, comp: *anyopaque, entity: Entity, world: *World) !void {
             const hooks = self.add_hooks.get(flag) orelse return;
             for (hooks.items) |hook| try hook.run(comp, entity, world);
         }
 
-        pub fn runRemoveHook(self: *Self, flag: CompFlag, comp: *anyopaque, entity: Entity, world: *World) !void {
+        pub fn runRemoveHook(self: *Self, flag: FlagSet.Flag, comp: *anyopaque, entity: Entity, world: *World) !void {
             const hooks = self.remove_hooks.get(flag) orelse return;
             for (hooks.items) |hook| try hook.run(comp, entity, world);
         }
 
-        pub fn runDespawnHook(self: *Self, flag: CompFlag, comp: *anyopaque, entity: Entity, world: *World) !void {
+        pub fn runDespawnHook(self: *Self, flag: FlagSet.Flag, comp: *anyopaque, entity: Entity, world: *World) !void {
             const hooks = self.despawn_hooks.get(flag) orelse return;
             for (hooks.items) |hook| try hook.run(comp, entity, world);
         }
 
         pub fn OnRemoveComp(
             self: *Self,
+            world: *App(desc),
             gpa: std.mem.Allocator,
             comptime T: type,
             comptime hook_fn: *const fn (*T, Entity, *World) EcsError!void,
         ) EcsError!void {
             const hook = Hook{ .run = (struct {
-                fn run(ptr: *anyopaque, entity: Entity, world: *World) EcsError!void {
+                fn run(ptr: *anyopaque, entity: Entity, w: *World) EcsError!void {
                     const comp: *T = @ptrCast(@alignCast(ptr));
-                    try hook_fn(comp, entity, world);
+                    try hook_fn(comp, entity, w);
                 }
             }).run };
 
-            const flag = CompFlag.getFlag(T);
+            const flag = world.components.component_flags.getFlag(T);
             self.has_remove_hook.insert(flag);
 
             const res = try self.remove_hooks.getOrPut(gpa, flag);
@@ -2913,18 +2967,19 @@ pub fn HookRegistry(desc: AppDesc) type {
 
         pub fn OnDespawnComp(
             self: *Self,
+            world: *App(desc),
             gpa: std.mem.Allocator,
             comptime T: type,
             comptime hook_fn: *const fn (*T, Entity, *World) EcsError!void,
         ) EcsError!void {
             const hook = Hook{ .run = (struct {
-                fn run(ptr: *anyopaque, entity: Entity, world: *World) EcsError!void {
+                fn run(ptr: *anyopaque, entity: Entity, w: *World) EcsError!void {
                     const comp: *T = @ptrCast(@alignCast(ptr));
-                    try hook_fn(comp, entity, world);
+                    try hook_fn(comp, entity, w);
                 }
             }).run };
 
-            const flag = CompFlag.getFlag(T);
+            const flag = world.components.component_flags.getFlag(T);
             self.has_despawn_hook.insert(flag);
 
             const res = try self.despawn_hooks.getOrPut(gpa, flag);
@@ -2934,18 +2989,19 @@ pub fn HookRegistry(desc: AppDesc) type {
 
         pub fn OnAddComp(
             self: *Self,
+            world: *App(desc),
             gpa: std.mem.Allocator,
             comptime T: type,
             comptime hook_fn: *const fn (*T, Entity, *World) EcsError!void,
         ) EcsError!void {
             const hook = Hook{ .run = (struct {
-                fn run(ptr: *anyopaque, entity: Entity, world: *World) EcsError!void {
+                fn run(ptr: *anyopaque, entity: Entity, w: *World) EcsError!void {
                     const comp: *T = @ptrCast(@alignCast(ptr));
-                    try hook_fn(comp, entity, world);
+                    try hook_fn(comp, entity, w);
                 }
             }).run };
 
-            const flag = CompFlag.getFlag(T);
+            const flag = world.components.component_flags.getFlag(T);
             self.has_add_hook.insert(flag);
 
             const res = try self.add_hooks.getOrPut(gpa, flag);

@@ -35,7 +35,7 @@ pub fn EventExtension(comptime cfg: ecs.AppDesc) type {
                 const Self = @This();
                 events: []T,
 
-                pub fn fromLocal(world: *App, _: *ecs.ResourceRegistry) !Self {
+                pub fn fromLocal(world: *App, _: *ecs.ResourceRegistry(cfg.FlagInt)) !Self {
                     const store = try world.getResource(EventStore(T));
                     return Self{
                         .events = store.current.items,
@@ -58,8 +58,8 @@ pub fn EventExtension(comptime cfg: ecs.AppDesc) type {
                     };
                 }
 
-                pub fn addAccess(access: *ecs.Access) void {
-                    const flag = ecs.ResFlag.getFlag(EventStore(T));
+                pub fn addAccess(app: *App, access: *ecs.Access(cfg.FlagInt)) void {
+                    const flag = app.resources.resource_flags.getFlag(EventStore(T));
                     access.res_read_write.insert(flag);
                     access.res_write.insert(flag);
                 }

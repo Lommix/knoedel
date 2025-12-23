@@ -15,6 +15,7 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const ResMut = App.ResMut;
         pub const Local = ecs.Local;
         pub const Query = App.Query;
+        pub const QueryS = App.QueryS;
         pub const QueryFiltered = App.QueryFiltered;
         pub const Alloc = App.Alloc;
         pub const Jobs = App.Jobs;
@@ -29,13 +30,13 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const CommandFn = App.CommandFn;
         pub const Children = ecs.Children;
         pub const Parent = ecs.Parent;
-        pub const ResouceRegistry = ecs.ResourceRegistry;
+        pub const ResouceRegistry = ecs.ResourceRegistry(cfg.FlagInt);
         pub const ConditionFn = App.SystemRegistry.ConditionFn;
         pub const SystemFn = App.SystemRegistry.SystemFn;
         pub const Error = ecs.EcsError;
-        pub const Access = ecs.Access;
-        pub const ResFlag = ecs.ResFlag;
-        pub const CompFlag = ecs.CompFlag;
+        pub const Access = ecs.Access(cfg.FlagInt);
+        // pub const ResFlag = ecs.ResFlag;
+        // pub const CompFlag = ecs.CompFlag;
 
         // Event Extension
         const e = ev.EventExtension(cfg);

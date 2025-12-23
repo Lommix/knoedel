@@ -49,7 +49,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
             const StateType = @TypeOf(default_state);
             return struct {
                 pub fn plugin(world: *App) !void {
-                    try world.addResource(State(StateType).new(default_state));
+                    try world.tryAddResource(State(StateType).new(default_state));
                     try world.addSystemEx(Schedule, &despawn_scoped, OnTransition(StateType));
                 }
 
@@ -84,7 +84,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         pub fn InState(comptime state: anytype) FilterFunc {
             comptime if (!@typeInfo(@TypeOf(state)).@"enum".is_exhaustive) @compileError("States must be enums");
             return (struct {
-                fn isInState(world: *App, _: *ecs.ResourceRegistry) !bool {
+                fn isInState(world: *App, _: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(@TypeOf(state)));
                     return s.current == state;
                 }
@@ -96,7 +96,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         pub fn OnTransition(comptime S: type) FilterFunc {
             comptime if (!@typeInfo(S).@"enum".is_exhaustive) @compileError("States must be enums");
             return (struct {
-                fn onEnter(world: *App, locals: *ecs.ResourceRegistry) !bool {
+                fn onEnter(world: *App, locals: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(S));
                     const local = try locals.getOrDefault(world.memtator.world(), StateObserver(S));
 
@@ -114,7 +114,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         pub fn OnEnter(comptime state: anytype) FilterFunc {
             comptime if (!@typeInfo(@TypeOf(state)).@"enum".is_exhaustive) @compileError("States must be enums");
             return (struct {
-                fn onEnter(world: *App, locals: *ecs.ResourceRegistry) !bool {
+                fn onEnter(world: *App, locals: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(@TypeOf(state)));
                     var local = try locals.getOrDefault(world.memtator.world(), StateObserver(@TypeOf(state)));
 
@@ -134,7 +134,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         pub fn OnExit(comptime state: anytype) FilterFunc {
             comptime if (!@typeInfo(@TypeOf(state)).@"enum".is_exhaustive) @compileError("States must be enums");
             return (struct {
-                fn onEnter(world: *App, locals: *ecs.ResourceRegistry) !bool {
+                fn onEnter(world: *App, locals: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(@TypeOf(state)));
                     var local = try locals.getOrDefault(world.memtator.world(), StateObserver(@TypeOf(state)));
 
