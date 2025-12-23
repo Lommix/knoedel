@@ -1292,6 +1292,7 @@ pub fn App(comptime desc: AppDesc) type {
             return IQueryFiltered(desc, query, .{});
         }
 
+        // query directly via type
         pub fn QueryS(comptime Q: type, filter: anytype) type {
             return IQueryStructFiltered(desc, Q, filter);
         }
