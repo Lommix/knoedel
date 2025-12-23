@@ -2543,6 +2543,18 @@ pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime query_struct: type,
             };
         }
 
+        pub fn count(self: *const Self) usize {
+            var it = ArchIter(desc.FlagInt){
+                .include = self.include,
+                .exclude = self.exclude,
+                .reg = self.reg.archtypes.items,
+            };
+
+            var c: usize = 0;
+            while (it.next()) |arch| c += arch.len;
+            return c;
+        }
+
         pub fn fromWorld(world: *App(desc)) EcsError!Self {
             const set = extractQuerySetsFromEntry(desc, world, query_struct, filter);
             return Self{
