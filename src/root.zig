@@ -16,6 +16,7 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const Local = ecs.Local;
         pub const Query = App.Query;
         pub const QueryS = App.QueryS;
+        pub const QuerySFiltered = App.QuerySFiltered;
         pub const QueryFiltered = App.QueryFiltered;
         pub const Alloc = App.Alloc;
         pub const Jobs = App.Jobs;

@@ -17,7 +17,6 @@ pub const GB: usize = MB * 1000;
 pub const AppDesc = struct {
     thread_count: comptime_int = 8,
     max_frame_mem: usize = 64 * MB,
-    max_components: comptime_int = 128, // TODO: reimplement, this does currently nothing
     // TODO: defines max components and resources bit sets
     FlagInt: type = u6,
 };
@@ -256,7 +255,9 @@ pub fn App(comptime desc: AppDesc) type {
 
         /// run a system schedule in lock free parallel
         pub fn runPar(self: *World, schedule: anytype, flush_commands_after: bool) void {
-            self.systems.runPar(schedule, self) catch return;
+            self.systems.runPar(schedule, self) catch |err| {
+                std.log.err("system failed with `{any}`", .{err});
+            };
             if (flush_commands_after) self.flushCommands();
         }
 
@@ -437,15 +438,19 @@ pub fn App(comptime desc: AppDesc) type {
         /// main system scheduler
         pub const SystemRegistry = struct {
             executor: BatchExecutor = undefined,
-            systems: std.ArrayList(OpaqueSystem) = .{},
-            system_ptr_lookup: std.AutoHashMapUnmanaged(usize, SystemID) = .{},
+            // systems: std.ArrayList(OpaqueSystem) = .{},
+            // system_ptr_lookup: std.AutoHashMapUnmanaged(usize, SystemID) = .{},
+            // store new locals here
+            systems: std.AutoHashMapUnmanaged(SystemID, OpaqueSystem) = .{},
+            locals: std.AutoHashMapUnmanaged(SystemID, LocalRegistry(desc.FlagInt)) = .{},
             schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .{},
+
             // --------------------------
             const Self = @This();
             const LocalRegistry = ResourceRegistry;
             pub const ConditionFn = *const fn (*World, *LocalRegistry(desc.FlagInt)) EcsError!bool;
             pub const SystemFn = *const fn (*anyopaque, *World, *LocalRegistry(desc.FlagInt), u32) EcsError!void;
-            pub const SystemID = struct { slot: usize };
+            pub const SystemID = u32;
             const ScheduleID = u32;
             /// a system's mem represntation
             pub const OpaqueSystem = struct {
@@ -454,7 +459,6 @@ pub fn App(comptime desc: AppDesc) type {
                 run: SystemRegistry.SystemFn,
                 condition: ?SystemRegistry.ConditionFn = null,
                 debug: []u8,
-                locals: LocalRegistry(desc.FlagInt) = .{},
                 run_time_ns: i128 = 0,
                 batch_id: usize = 0,
                 last_run_tick: u32 = 0,
@@ -481,10 +485,8 @@ pub fn App(comptime desc: AppDesc) type {
 
             /// free all registered systems, leaky, debug only idc
             pub fn clear(self: *Self, gpa: std.mem.Allocator) void {
-                _ = gpa; // autofix
-                self.systems.clearRetainingCapacity();
-                self.schedule_order.clearRetainingCapacity();
-                self.system_ptr_lookup.clearRetainingCapacity();
+                self.systems.clearAndFree(gpa);
+                self.schedule_order.clearAndFree(gpa);
             }
 
             pub fn getScheduleTime(self: *SystemRegistry, schedule: anytype) i128 {
@@ -502,7 +504,6 @@ pub fn App(comptime desc: AppDesc) type {
             }
 
             /// Extracting the original function path from the return type.
-            /// highly illegal function, thx Zig!
             inline fn extractFnName(comptime func: anytype) []const u8 {
                 if (!@inComptime()) @compileError("lol");
                 const fn_type = @typeInfo(@TypeOf(func)).pointer.child;
@@ -511,6 +512,7 @@ pub fn App(comptime desc: AppDesc) type {
 
                 return comptime blk: {
                     if (ret_str.len <= 28) {
+                        // TODO: this is a bug, same name, same hash, same locals
                         break :blk "anonym";
                     }
 
@@ -561,6 +563,7 @@ pub fn App(comptime desc: AppDesc) type {
             ) EcsError!SystemID {
                 const func = system;
                 const fn_name = comptime extractFnName(func);
+                const hash = comptime hashStr(fn_name);
 
                 if (@typeInfo(@TypeOf(func)) != .pointer) @compileError(cprint("system needs to be pointer in `{s}`", .{fn_name}));
                 if (@typeInfo(@typeInfo(@TypeOf(func)).pointer.child) != .@"fn") @compileError(cprint("system needs to be pointer `{s}`", .{fn_name}));
@@ -582,6 +585,46 @@ pub fn App(comptime desc: AppDesc) type {
                     }
                 }
 
+                // if (self.systems.getPtr(hash)) |sys| {
+                //     sys.ptr = @constCast(func);
+                //     sys.access = access;
+                //     sys.condition = condition_fn;
+                //     sys.debug = try std.fmt.allocPrint(gpa, "{s}", .{fn_name});
+                //     sys.run = (struct {
+                //         fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry(desc.FlagInt), last_run_tick: u32) EcsError!void {
+                //             const sys_func: *fnType = @ptrCast(@alignCast(ptr));
+                //             var sys_args: genArgType(info.@"fn".params) = undefined;
+                //             inline for (info.@"fn".params, 0..) |*p, i| {
+                //                 const PT = switch (@typeInfo(p.type.?)) {
+                //                     .@"struct" => p.type.?,
+                //                     else => @compileError("not a valid system param type, needs to be a struct"),
+                //                 };
+                //
+                //                 if (@hasDecl(PT, "fromLocal")) {
+                //                     @field(sys_args, cprint("{d}", .{i})) = try PT.fromLocal(world, locals);
+                //                     continue;
+                //                 }
+                //
+                //                 if (@hasDecl(PT, "fromWorld")) {
+                //                     var ret = try PT.fromWorld(world);
+                //                     if (@hasDecl(PT, "setWorldTick")) ret.setWorldTick(last_run_tick);
+                //                     @field(sys_args, cprint("{d}", .{i})) = ret;
+                //                     continue;
+                //                 }
+                //
+                //                 if (@hasDecl(PT, "is_local_marker")) {
+                //                     const res = try locals.getOrDefault(world.memtator.world(), PT.innerType);
+                //                     @field(sys_args, cprint("{d}", .{i})) = PT{ .inner = res };
+                //                     continue;
+                //                 }
+                //
+                //                 @compileError(cprint("system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
+                //             }
+                //
+                //             try @call(.auto, sys_func, sys_args);
+                //         }
+                //     }).run;
+                // } else {
                 const op_system = OpaqueSystem{
                     .ptr = @constCast(func),
                     .access = access,
@@ -589,6 +632,7 @@ pub fn App(comptime desc: AppDesc) type {
                     .debug = try std.fmt.allocPrint(gpa, "{s}", .{fn_name}),
                     .run = (struct {
                         fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry(desc.FlagInt), last_run_tick: u32) EcsError!void {
+                            @setEvalBranchQuota(3200);
                             const sys_func: *fnType = @ptrCast(@alignCast(ptr));
                             var sys_args: genArgType(info.@"fn".params) = undefined;
                             inline for (info.@"fn".params, 0..) |*p, i| {
@@ -622,11 +666,18 @@ pub fn App(comptime desc: AppDesc) type {
                         }
                     }).run,
                 };
+                try self.systems.put(gpa, hash, op_system);
 
-                try self.systems.append(gpa, op_system);
-                const id = SystemID{ .slot = self.systems.items.len - 1 };
-                // try self.system_ptr_lookup.put(@intFromPtr(system), id);
-                return id;
+                if (!self.locals.contains(hash)) {
+                    try self.locals.putNoClobber(gpa, hash, .{});
+                }
+
+                return hash;
+
+                // try self.systems.append(gpa, op_system);
+                // const id = SystemID{ .slot = self.systems.items.len - 1 };
+                // // try self.system_ptr_lookup.put(@intFromPtr(system), id);
+                // return id;
             }
 
             pub fn add(
@@ -726,9 +777,11 @@ pub fn App(comptime desc: AppDesc) type {
                 const start = std.time.nanoTimestamp();
 
                 for (set.systems.items) |entry| {
-                    const sys = &self.systems.items[entry.id.slot];
+                    const sys = self.systems.getPtr(entry.id).?;
+                    const locals = self.locals.getPtr(entry.id).?;
+
                     if (sys.condition) |con| {
-                        const should_run = con(world, &sys.locals) catch {
+                        const should_run = con(world, locals) catch {
                             return EcsError.SystemConditionFailure;
                         };
 
@@ -750,8 +803,10 @@ pub fn App(comptime desc: AppDesc) type {
                     for (scheduled_systems.items, 0..) |id, index| {
                         if (dep_counter.get(id)) |count| if (count > 0) continue;
 
-                        const sys = &self.systems.items[id.slot];
-                        executeSystem(sys, world, 0);
+                        const sys = self.systems.getPtr(id).?;
+                        const locals = self.locals.getPtr(id).?;
+
+                        executeSystem(sys, locals, world, 0);
 
                         try remove_list.append(gpa, index);
                         if (dep_graph.getPtr(id)) |deps| {
@@ -865,10 +920,10 @@ pub fn App(comptime desc: AppDesc) type {
                 set.batch_count = batches.items.len;
             }
 
-            fn executeSystem(sys: *OpaqueSystem, world: *World, batch_id: usize) void {
+            fn executeSystem(sys: *OpaqueSystem, locals: *LocalRegistry(desc.FlagInt), world: *World, batch_id: usize) void {
                 const start = std.time.nanoTimestamp();
 
-                sys.run(sys.ptr, world, &sys.locals, sys.last_run_tick) catch |err| {
+                sys.run(sys.ptr, world, locals, sys.last_run_tick) catch |err| {
                     std.log.scoped(.knoedel).warn("system failed with: `{any}` @`{s}`", .{ err, sys.debug });
                 };
 
@@ -1018,25 +1073,30 @@ pub fn App(comptime desc: AppDesc) type {
                 return entity;
             }
 
+            /// despawns an entity
             pub fn despawn(self: *const Self, entity: Entity) EcsError!void {
                 const cmd = try despawnCommand(self.frame_gpa, entity);
                 try self.reg.add(self.frame_gpa, cmd);
             }
 
+            /// remove a component from entity
             pub fn remove(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
                 const cmd = try removeCommand(self.frame_gpa, entity, C);
                 try self.reg.add(self.frame_gpa, cmd);
             }
 
+            /// add a subcommand
             pub fn add(self: *const Self, cmd: Command) EcsError!void {
                 try self.reg.add(self.frame_gpa, cmd);
             }
 
+            /// add a component to entity, overwritting existing
             pub fn insert(self: *const Self, entity: Entity, comp: anytype) EcsError!void {
                 const cmd = try insertCommand(self.frame_gpa, entity, comp);
                 try self.reg.add(self.frame_gpa, cmd);
             }
 
+            /// add a resource, overwritting existing (calls `deinit` with alloc on res)
             pub fn insertResource(self: *const Self, comp: anytype) EcsError!void {
                 const cmd = try insertResourceCommand(self.frame_gpa, comp);
                 try self.reg.add(self.frame_gpa, cmd);
@@ -1288,17 +1348,32 @@ pub fn App(comptime desc: AppDesc) type {
             run: CommandFn,
         };
 
+        /// ## SystemParams
+        /// A query accepting a tuple of types
+        /// `customers: Query(.{Transform, Mut(Customer)})`
         pub fn Query(query: anytype) type {
             return IQueryFiltered(desc, query, .{});
         }
 
-        // query directly via type
-        pub fn QueryS(comptime Q: type, filter: anytype) type {
-            return IQueryStructFiltered(desc, Q, filter);
+        /// ## SystemParams
+        /// A query accepting a query struct directly
+        /// `customers: QueryS(struct{c: *Customer, t: *const Transform})`
+        pub fn QueryS(comptime Q: type) type {
+            return IQueryStructFiltered(desc, Q, .{});
         }
 
+        /// ## SystemParams
+        /// A query accepting a tuple of types with filter
+        /// `customers: Query(.{Transform, Mut(Customer)}, .{With(Visible)})`
         pub fn QueryFiltered(query: anytype, filter: anytype) type {
             return IQueryFiltered(desc, query, filter);
+        }
+
+        /// ## SystemParams
+        /// A query accepting a query struct directly and a filter
+        /// `customers: QuerySFiltered(struct{c: *Customer, t: *const Transform}, .{With(Visible)})`
+        pub fn QuerySFiltered(comptime Q: type, filter: anytype) type {
+            return IQueryStructFiltered(desc, Q, filter);
         }
     };
 }
@@ -1374,6 +1449,12 @@ pub fn WithOut(comptime C: type) type {
         const inner = C;
         const _is_without: bool = true;
     };
+}
+
+pub inline fn hashStr(str: []const u8) u32 {
+    var value: u32 = 2166136261;
+    for (str) |c| value = (value ^ @as(u32, @intCast(c))) *% 16777619;
+    return value;
 }
 
 pub inline fn hashType(comptime T: type) u32 {
@@ -2515,7 +2596,7 @@ fn IsWrite(comptime T: type, comptime query: anytype) bool {
     return found;
 }
 
-pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime query_struct: type, comptime filter: anytype) type {
+pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime QueryStruct: type, comptime filter: anytype) type {
     return struct {
         const Self = @This();
         const FlagSet = HeapFlagSet(desc.FlagInt);
@@ -2526,13 +2607,13 @@ pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime query_struct: type,
         world_tick: u32,
 
         pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
-            const set = extractQuerySetsFromEntry(desc, world, query_struct, filter);
+            const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
             access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
             access.comp_write = access.comp_write.unionWith(set.write_set);
         }
 
-        pub fn iter(self: *const Self) Qiter(desc.FlagInt, query_struct, filter) {
-            return Qiter(desc.FlagInt, query_struct, filter){
+        pub fn iter(self: *const Self) Qiter(desc.FlagInt, QueryStruct, filter) {
+            return Qiter(desc.FlagInt, QueryStruct, filter){
                 .world_tick = self.world_tick,
                 .flags = &self.reg.component_flags,
                 .arch_iter = ArchIter(desc.FlagInt){
@@ -2541,6 +2622,18 @@ pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime query_struct: type,
                     .reg = self.reg.archtypes.items,
                 },
             };
+        }
+
+        pub fn first(self: *const Self) ?QueryStruct {
+            var it = self.iter();
+            return it.next();
+        }
+
+        pub fn get(self: *const Self, entity: Entity) EcsError!QueryStruct {
+            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            const arch = &self.reg.archtypes.items[arch_id];
+            const index = arch.entity_lookup.get(entity).?;
+            return arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, QueryStruct, filter);
         }
 
         pub fn count(self: *const Self) usize {
@@ -2556,7 +2649,7 @@ pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime query_struct: type,
         }
 
         pub fn fromWorld(world: *App(desc)) EcsError!Self {
-            const set = extractQuerySetsFromEntry(desc, world, query_struct, filter);
+            const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
             return Self{
                 .exclude = set.exclude_set,
                 .include = set.include_set,
