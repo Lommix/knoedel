@@ -12,12 +12,10 @@ pub const MB: usize = 1024 * 1000;
 pub const GB: usize = MB * 1000;
 
 /// ECS configuration
-/// CRITICAL: components are locked to 128!
-/// TODO: reimplement comptime comp & res size!
 pub const AppDesc = struct {
     thread_count: comptime_int = 8,
     max_frame_mem: usize = 64 * MB,
-    // TODO: defines max components and resources bit sets
+    // TODO: defines max components and resources bit sets u6 = 64 Components max
     FlagInt: type = u6,
 };
 
@@ -541,7 +539,7 @@ pub fn App(comptime desc: AppDesc) type {
                 var info = ScheduleStats{};
 
                 for (set.systems.items) |*en| {
-                    const sys = &self.systems.items[en.id.slot];
+                    const sys = self.systems.getPtr(en.id) orelse continue;
                     try info.batches.append(gpa, .{
                         .batch_id = sys.batch_id,
                         .name = sys.debug,
@@ -845,9 +843,11 @@ pub fn App(comptime desc: AppDesc) type {
 
                 // prep running system
                 for (set.systems.items) |entry| {
-                    const sys = &self.systems.items[entry.id.slot];
+                    const sys = self.systems.getPtr(entry.id) orelse continue;
+                    const locals = self.locals.getPtr(entry.id) orelse continue;
+
                     if (sys.condition) |con| {
-                        const should_run = con(world, &sys.locals) catch {
+                        const should_run = con(world, locals) catch {
                             return EcsError.SystemConditionFailure;
                         };
 
@@ -909,8 +909,9 @@ pub fn App(comptime desc: AppDesc) type {
                 for (batches.items, 0..) |batch, i| {
                     var wg = std.Thread.WaitGroup{};
                     for (batch.items) |id| {
-                        const sys = &self.systems.items[id.slot];
-                        try self.executor.run(&wg, executeSystem, .{ sys, world, i });
+                        const sys = self.systems.getPtr(id).?;
+                        const locals = self.locals.getPtr(id).?;
+                        try self.executor.run(&wg, executeSystem, .{ sys, locals, world, i });
                     }
                     wg.wait();
                 }
@@ -1621,19 +1622,19 @@ pub fn Access(FlagInt: type) type {
             self.res_write.setUnion(lhs.res_write);
         }
 
-        inline fn comp_compatible(self: *const Self, lhs: *const Self) bool {
+        inline fn comp_compatible(self: *const Self, other: *const Self) bool {
             const empty = FlagSet.Set.initEmpty();
-            if (!self.comp_read_write.intersectWith(lhs.comp_write).eql(empty)) return false;
-            if (!self.comp_write.intersectWith(lhs.comp_read_write).eql(empty)) return false;
-            if (!self.comp_write.intersectWith(lhs.comp_write).eql(empty)) return false;
+            if (!self.comp_read_write.intersectWith(other.comp_write).eql(empty)) return false;
+            if (!self.comp_write.intersectWith(other.comp_read_write).eql(empty)) return false;
+            if (!self.comp_write.intersectWith(other.comp_write).eql(empty)) return false;
             return true;
         }
 
-        inline fn res_compatible(self: *const Self, lhs: *const Self) bool {
+        inline fn res_compatible(self: *const Self, other: *const Self) bool {
             const empty = FlagSet.Set.initEmpty();
-            if (!self.res_read_write.intersectWith(lhs.res_write).eql(empty)) return false;
-            if (!self.res_write.intersectWith(lhs.res_read_write).eql(empty)) return false;
-            if (!self.res_write.intersectWith(lhs.res_write).eql(empty)) return false;
+            if (!self.res_read_write.intersectWith(other.res_write).eql(empty)) return false;
+            if (!self.res_write.intersectWith(other.res_read_write).eql(empty)) return false;
+            if (!self.res_write.intersectWith(other.res_write).eql(empty)) return false;
             return true;
         }
     };
@@ -3113,6 +3114,26 @@ pub fn HookRegistry(desc: AppDesc) type {
             const res = try self.add_hooks.getOrPut(gpa, flag);
             if (!res.found_existing) res.value_ptr.* = .{};
             try res.value_ptr.append(gpa, hook);
+        }
+    };
+}
+
+pub fn WorldAccess(desc: AppDesc) type {
+    return struct {
+        /// Full world access
+        inner: *App(desc),
+
+        pub fn addAccess(_: *App(desc), access: *Access(desc.FlagInt)) void {
+            access.res_read_write = .initFull();
+            access.res_write = .initFull();
+            access.comp_read_write = .initFull();
+            access.comp_write = .initFull();
+        }
+
+        pub fn fromWorld(app: *App(desc)) EcsError!@This() {
+            return .{
+                .inner = app,
+            };
         }
     };
 }
