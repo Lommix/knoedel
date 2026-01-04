@@ -1404,6 +1404,7 @@ pub fn Has(comptime T: type) type {
     return struct {
         const _is_has: bool = true;
         const inner = T;
+        val: bool = false,
     };
 }
 
@@ -1995,6 +1996,15 @@ fn ArchType(FlagInt: type) type {
                 if (@sizeOf(field.type) == 0) {
                     @field(row, field.name) = .{};
                     continue;
+                }
+
+                if (@typeInfo(field.type) == .@"struct") {
+                    if (@hasDecl(field.type, "_is_has")) {
+                        const flag = flags.getFlag(field.type.inner);
+                        const has = self.mask.contains(flag);
+                        @field(row, field.name) = .{ .val = has };
+                        continue;
+                    }
                 }
 
                 const field_ptr = switch (@typeInfo(field.type)) {
