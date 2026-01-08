@@ -132,6 +132,7 @@ pub const EcsError = error{
     ResourceNotFound,
     SystemFailure,
     SystemConditionFailure,
+    DuplicateSystemRegistration,
     ComponentNotFound,
     EntityNotFound,
     UnknownType,
@@ -563,6 +564,11 @@ pub fn App(comptime desc: AppDesc) type {
                 const fn_name = comptime extractFnName(func);
                 const hash = comptime hashStr(fn_name);
 
+                if (self.systems.contains(hash)) {
+                    std.log.err("duplicate system `{s}`", .{fn_name});
+                    return EcsError.DuplicateSystemRegistration;
+                }
+
                 if (@typeInfo(@TypeOf(func)) != .pointer) @compileError(cprint("system needs to be pointer in `{s}`", .{fn_name}));
                 if (@typeInfo(@typeInfo(@TypeOf(func)).pointer.child) != .@"fn") @compileError(cprint("system needs to be pointer `{s}`", .{fn_name}));
 
@@ -623,6 +629,7 @@ pub fn App(comptime desc: AppDesc) type {
                 //         }
                 //     }).run;
                 // } else {
+
                 const op_system = OpaqueSystem{
                     .ptr = @constCast(func),
                     .access = access,
@@ -892,7 +899,7 @@ pub fn App(comptime desc: AppDesc) type {
                     for (update_deps.items) |id| {
                         if (dep_graph.getPtr(id)) |deps| {
                             for (deps.items) |dep_id| {
-                                if (dep_counter.getPtr(dep_id)) |count| count.* = count.* - 1;
+                                if (dep_counter.getPtr(dep_id)) |count| count.* = count.* -| 1;
                             }
                         }
                     }
@@ -929,7 +936,7 @@ pub fn App(comptime desc: AppDesc) type {
                 };
 
                 const total = std.time.nanoTimestamp() - start;
-                sys.run_time_ns = @divTrunc(sys.run_time_ns + total, 2);
+                sys.run_time_ns = total; // @divTrunc(sys.run_time_ns + total, 2);
                 sys.batch_id = batch_id;
                 sys.last_run_tick = world.world_tick;
             }
@@ -1571,7 +1578,8 @@ fn HeapFlagSet(comptime FlagInt: type) type {
             hash: u32,
             size: usize,
             alignment: usize,
-            serialize: ?*const fn (ptr: *anyopaque, writer: std.Io.Writer) EcsError!void,
+            serialize: ?*const fn (*const anyopaque, *std.Io.Writer) EcsError!void,
+            print: ?*const fn (*const anyopaque, *std.Io.Writer) EcsError!void,
         };
 
         pub inline fn getFlag(self: *Self, comptime T: type) Flag {
@@ -1590,6 +1598,24 @@ fn HeapFlagSet(comptime FlagInt: type) type {
                 .size = @sizeOf(T),
                 .alignment = @alignOf(T),
                 .serialize = null,
+                .print = (struct {
+                    fn fmt(ptr: *const anyopaque, w: *std.Io.Writer) EcsError!void {
+                        const comp: *const T = @ptrCast(@alignCast(ptr));
+                        if (@hasDecl(T, "fmt")) {
+                            try comp.fmt(w);
+                        } else {
+                            switch (@typeInfo(T)) {
+                                .@"struct" => |str| {
+                                    inline for (str.fields, 0..) |field, i| {
+                                        try w.print("{s}: {any}", .{ field.name, @field(comp, field.name) });
+                                        if (i < str.fields.len -| 1) try w.print("\n", .{});
+                                    }
+                                },
+                                else => try w.writeAll("uknown"),
+                            }
+                        }
+                    }
+                }).fmt,
             };
 
             return @enumFromInt(index);
