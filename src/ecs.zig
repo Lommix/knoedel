@@ -33,6 +33,7 @@ pub const Memtator = struct {
     world_mutex: std.Thread.Mutex = .{},
     world_mem_size: usize = 0,
     frame_alloc: std.heap.FixedBufferAllocator,
+    frame_max_alloc_perc: f32 = 0,
     parent: std.mem.Allocator,
 
     /// requires pinned postion on memory.
@@ -112,6 +113,8 @@ pub const Memtator = struct {
 
     /// reset the frame arena
     pub fn resetFrame(self: *Self) void {
+        const frame_percent: f32 = @floatCast(@as(f64, @floatFromInt(self.frame_alloc.end_index)) / @as(f64, @floatFromInt(self.frame_sector.len)));
+        self.frame_max_alloc_perc = frame_percent;
         self.frame_alloc.reset();
     }
 
@@ -2576,6 +2579,7 @@ fn extractQuerySetsFromEntry(comptime desc: AppDesc, world: *App(desc), comptime
             .pointer => |ptr| {
                 const comp_id = world.components.component_flags.getFlag(ptr.child);
                 set.read_set.insert(comp_id);
+                set.include_set.insert(comp_id);
                 if (!ptr.is_const) set.write_set.insert(comp_id);
             },
             .@"struct" => {}, // skip for now
@@ -2673,6 +2677,7 @@ pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime QueryStruct: type, 
             return arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, QueryStruct, filter);
         }
 
+        /// totoal entity count for query
         pub fn count(self: *const Self) usize {
             var it = ArchIter(desc.FlagInt){
                 .include = self.include,
