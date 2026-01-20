@@ -565,7 +565,7 @@ pub fn App(comptime desc: AppDesc) type {
             ) EcsError!SystemID {
                 const func = system;
                 const fn_name = comptime extractFnName(func);
-                const hash = comptime hashStr(fn_name);
+                const hash = comptime hashStr(@typeName(@TypeOf(system)));
 
                 if (self.systems.contains(hash)) {
                     std.log.err("duplicate system `{s}`", .{fn_name});
@@ -1465,7 +1465,7 @@ pub fn WithOut(comptime C: type) type {
 
 pub inline fn hashStr(str: []const u8) u32 {
     var value: u32 = 2166136261;
-    for (str) |c| value = (value ^ @as(u32, @intCast(c))) *% 16777619;
+    inline for (str) |c| value = (value ^ @as(u32, @intCast(c))) *% 16777619;
     return value;
 }
 
