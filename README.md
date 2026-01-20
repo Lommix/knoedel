@@ -103,6 +103,8 @@ fn spawn_player(
     game_state: kn.ResMut(kn.State(Gamestate)),
     // Queries can have multiple filters. `With(type)`, `WithOut(type)`, `Added(type)` and `Changed(type)` provided by core
     query: QueryFiltered(.{kn.Mut(Enemy), SomeComp}, .{kn.Added(Idle)}),
+    // you can also directly query an entry
+    short_query: QueryS(struct {t: *Transform, v: *const Visbility}),
     // system local resources.
     counter: kn.Local(MyRes),
     // event writer and reader, just like in Bevy
@@ -126,6 +128,11 @@ fn spawn_player(
     while(it.next()) |entry| {
         entry.enemy.target = player_entity;
         std.debug.print("updated entity {d}\n", .{entry.entity.id()});
+    }
+
+    var sit = short_query.iter();
+    while(sit.next()) |en|{
+        std.debug.print("transform: {any}\n", .{en.t.*});
     }
 
     // enter next state
