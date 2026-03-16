@@ -439,21 +439,20 @@ pub fn App(comptime desc: AppDesc) type {
 
         /// main system scheduler
         pub const SystemRegistry = struct {
+            // --------------------------
             executor: BatchExecutor = undefined,
-            // systems: std.ArrayList(OpaqueSystem) = .{},
-            // system_ptr_lookup: std.AutoHashMapUnmanaged(usize, SystemID) = .{},
-            // store new locals here
             systems: std.AutoHashMapUnmanaged(SystemID, OpaqueSystem) = .{},
             locals: std.AutoHashMapUnmanaged(SystemID, LocalRegistry(desc.FlagInt)) = .{},
             schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .{},
-
             // --------------------------
+
             const Self = @This();
             const LocalRegistry = ResourceRegistry;
             pub const ConditionFn = *const fn (*World, *LocalRegistry(desc.FlagInt)) EcsError!bool;
             pub const SystemFn = *const fn (*anyopaque, *World, *LocalRegistry(desc.FlagInt), u32) EcsError!void;
             pub const SystemID = u32;
             const ScheduleID = u32;
+
             /// a system's mem represntation
             pub const OpaqueSystem = struct {
                 access: Access(desc.FlagInt),
@@ -465,6 +464,7 @@ pub fn App(comptime desc: AppDesc) type {
                 batch_id: usize = 0,
                 last_run_tick: u32 = 0,
             };
+
 
             pub const Schedule = struct {
                 systems: std.ArrayList(struct {
@@ -591,47 +591,6 @@ pub fn App(comptime desc: AppDesc) type {
                         PT.SelfValidate();
                     }
                 }
-
-                // if (self.systems.getPtr(hash)) |sys| {
-                //     sys.ptr = @constCast(func);
-                //     sys.access = access;
-                //     sys.condition = condition_fn;
-                //     sys.debug = try std.fmt.allocPrint(gpa, "{s}", .{fn_name});
-                //     sys.run = (struct {
-                //         fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry(desc.FlagInt), last_run_tick: u32) EcsError!void {
-                //             const sys_func: *fnType = @ptrCast(@alignCast(ptr));
-                //             var sys_args: genArgType(info.@"fn".params) = undefined;
-                //             inline for (info.@"fn".params, 0..) |*p, i| {
-                //                 const PT = switch (@typeInfo(p.type.?)) {
-                //                     .@"struct" => p.type.?,
-                //                     else => @compileError("not a valid system param type, needs to be a struct"),
-                //                 };
-                //
-                //                 if (@hasDecl(PT, "fromLocal")) {
-                //                     @field(sys_args, cprint("{d}", .{i})) = try PT.fromLocal(world, locals);
-                //                     continue;
-                //                 }
-                //
-                //                 if (@hasDecl(PT, "fromWorld")) {
-                //                     var ret = try PT.fromWorld(world);
-                //                     if (@hasDecl(PT, "setWorldTick")) ret.setWorldTick(last_run_tick);
-                //                     @field(sys_args, cprint("{d}", .{i})) = ret;
-                //                     continue;
-                //                 }
-                //
-                //                 if (@hasDecl(PT, "is_local_marker")) {
-                //                     const res = try locals.getOrDefault(world.memtator.world(), PT.innerType);
-                //                     @field(sys_args, cprint("{d}", .{i})) = PT{ .inner = res };
-                //                     continue;
-                //                 }
-                //
-                //                 @compileError(cprint("system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
-                //             }
-                //
-                //             try @call(.auto, sys_func, sys_args);
-                //         }
-                //     }).run;
-                // } else {
 
                 const op_system = OpaqueSystem{
                     .ptr = @constCast(func),
@@ -2782,6 +2741,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bo
 
         fn passesTickFilter(arch: *ArchType(FlagInt), access: *const AccessSet(FlagInt), tick: u32, index: usize) bool {
             const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+
             if (!access.added.eql(empty)) {
                 var it = access.added.iterator();
                 while (it.next()) |flag| {
