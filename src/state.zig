@@ -55,7 +55,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
 
                 fn despawn_scoped(
                     cmd: App.Commands,
-                    query: App.Query(.{StateScoped(StateType)}),
+                    query: App.View(.{StateScoped(StateType)}),
                     state: App.Res(State(StateType)),
                 ) !void {
                     const current_state: StateType = state.inner.current;
