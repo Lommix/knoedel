@@ -1355,7 +1355,7 @@ pub fn App(comptime desc: AppDesc) type {
 
 const ArchEntry = struct {
     arch_id: u32,
-    set: u32,
+    set_id: u32,
 };
 
 /// cached querry values, that only need to compute once
@@ -1370,11 +1370,6 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         access_sets: [F.BranchCount()]AccessSet(FlagInt) = undefined,
         matched_archtypes: std.ArrayList(ArchEntry) = .{},
         last_update: u32 = 0,
-
-        required: FlagSet.Set = .initEmpty(),
-        forbidden: FlagSet.Set = .initEmpty(),
-        read_mask: FlagSet.Set = .initEmpty(),
-        write_mask: FlagSet.Set = .initEmpty(),
 
         pub fn new(
             gpa: std.mem.Allocator,
@@ -1431,14 +1426,10 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
                 }
             }
 
-            state.required = include.unionWith(intersect_with);
-            state.forbidden = intersect_without;
-            state.read_mask = read_mask;
-            state.write_mask = write_mask;
-            state.created_on = tick;
-
             try state.build_match(gpa, archtypes);
+
             state.last_update = @intCast(archtypes.len);
+            state.created_on = tick;
 
             return state;
         }
@@ -1450,7 +1441,7 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
                     if (access.matches(arch.mask)) {
                         try self.matched_archtypes.append(gpa, .{
                             .arch_id = @intCast(i),
-                            .set = @intCast(s),
+                            .set_id = @intCast(s),
                         });
                         continue :blk;
                     }
@@ -1618,19 +1609,19 @@ pub const Filter = union(enum) {
     }
 
     pub fn With(comptime T: type) Filter {
-        return .{ .with = hashType(T) };
+        return .{ .with = comptime hashType(T) };
     }
 
     pub fn Added(comptime T: type) Filter {
-        return .{ .added = hashType(T) };
+        return .{ .added = comptime hashType(T) };
     }
 
     pub fn Changed(comptime T: type) Filter {
-        return .{ .changed = hashType(T) };
+        return .{ .changed = comptime hashType(T) };
     }
 
     pub fn Without(comptime T: type) Filter {
-        return .{ .without = hashType(T) };
+        return .{ .without = comptime hashType(T) };
     }
 
     pub fn And(comptime a: Filter, comptime b: Filter) Filter {
@@ -2631,7 +2622,7 @@ fn ArchSopeIter(FlagInt: type) type {
             self.i += 1;
             return .{
                 .arch = &self.reg[next_arch.arch_id],
-                .access = &self.sets[next_arch.set],
+                .access = &self.sets[next_arch.set_id],
             };
         }
 
@@ -2740,25 +2731,19 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bo
         }
 
         inline fn passesTickFilter(arch: *ArchType(FlagInt), access: *const AccessSet(FlagInt), tick: u32, index: usize) bool {
-
-            if (!access.added.eql(empty)) {
-                var it = access.added.iterator();
-                while (it.next()) |flag| {
-                    const meta = arch.getMeta(flag) orelse continue;
-                    const info = arch.getTickInfo(index, meta);
-                    if (info.added < tick -| 1) return false;
-                }
+            var it = access.added.iterator();
+            while (it.next()) |flag| {
+                const meta = arch.getMeta(flag) orelse continue;
+                const info = arch.getTickInfo(index, meta);
+                if (info.added < tick -| 1) return false;
             }
 
-            if (!access.changed.eql(empty)) {
-                var it = access.changed.iterator();
-                while (it.next()) |flag| {
-                    const meta = arch.getMeta(flag) orelse continue;
-                    const info = arch.getTickInfo(index, meta);
-                    if (info.changed < tick -| 1) return false;
-                }
+            it = access.changed.iterator();
+            while (it.next()) |flag| {
+                const meta = arch.getMeta(flag) orelse continue;
+                const info = arch.getTickInfo(index, meta);
+                if (info.changed < tick -| 1) return false;
             }
-
             return true;
         }
 
