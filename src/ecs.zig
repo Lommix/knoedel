@@ -1393,6 +1393,10 @@ pub fn App(comptime desc: AppDesc) type {
     };
 }
 
+fn ArchEntry(FlagInt: type) type {
+    return struct { arch_id: u32, set: AccessSet(FlagInt) };
+}
+
 /// cached querry values, that only need to compute once
 fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
     return struct {
@@ -1401,25 +1405,22 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         const IS_ARCH_ONLY: bool = F.isArchOnly();
 
         // ---------------
-        sets: [F.BranchCount()]AccessSet(FlagInt) = undefined,
+        created_on: u64 = 0,
+        access_sets: [F.BranchCount()]AccessSet(FlagInt) = undefined,
+        matched_archtypes: std.ArrayList(ArchEntry(FlagInt)) = .{},
+        last_update: u32 = 0,
+
         required: FlagSet.Set = .initEmpty(),
+        forbidden: FlagSet.Set = .initEmpty(),
+        read_mask: FlagSet.Set = .initEmpty(),
+        write_mask: FlagSet.Set = .initEmpty(),
 
-        pub fn new(flags: *FlagSet) !Self {
-            var state = Self{};
-            // _ = state; // autofix
-
-            state.sets = try F.accessSets(FlagInt, flags);
-
-            for (state.sets, 0..) |set, i| {
-                std.debug.print("set: {d}\nwith: {any}\nwithout: {any}\nchanged: {any}\nadded: {any}\n", .{
-                    i,
-                    set.with,
-                    set.without,
-                    set.changed,
-                    set.added,
-                });
-            }
-
+        pub fn new(
+            gpa: std.mem.Allocator,
+            flags: *FlagSet,
+            archtypes: []const ArchType(FlagInt),
+            tick: u32,
+        ) !Self {
             var write_mask = FlagSet.Set.initEmpty();
             var read_mask = FlagSet.Set.initEmpty();
             var include = FlagSet.Set.initEmpty();
@@ -1450,7 +1451,49 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
                 }
             }
 
+            var state = Self{};
+
+            state.access_sets = try F.accessSets(FlagInt, flags, .{
+                .with = include,
+            });
+
+            var intersect_with: FlagSet.Set = .initEmpty();
+            var intersect_without: FlagSet.Set = .initEmpty();
+
+            for (state.access_sets, 0..) |set, i| {
+                if (i == 0) {
+                    intersect_with = set.with;
+                    intersect_without = set.without;
+                } else {
+                    intersect_with.setIntersection(set.with);
+                    intersect_without.setIntersection(set.without);
+                }
+            }
+
+            state.required = include.unionWith(intersect_with);
+            state.forbidden = intersect_without;
+            state.read_mask = read_mask;
+            state.write_mask = write_mask;
+            state.created_on = tick;
+
+            try state.build_match(gpa, archtypes);
+
             return state;
+        }
+
+        pub fn build_match(self: *Self, gpa: std.mem.Allocator, arches: []const ArchType(FlagInt)) !void {
+            self.matched_archtypes.clearRetainingCapacity();
+            blk: for (arches, 0..) |*arch, i| {
+                for (self.access_sets) |access| {
+                    if (access.matches(arch.mask)) {
+                        try self.matched_archtypes.append(gpa, .{
+                            .arch_id = @intCast(i),
+                            .set = access,
+                        });
+                        continue :blk;
+                    }
+                }
+            }
         }
     };
 }
@@ -1461,6 +1504,11 @@ fn AccessSet(FlagInt: type) type {
         without: HeapFlagSet(FlagInt).Set = .initEmpty(),
         added: HeapFlagSet(FlagInt).Set = .initEmpty(),
         changed: HeapFlagSet(FlagInt).Set = .initEmpty(),
+
+        pub fn matches(self: *const @This(), other: HeapFlagSet(FlagInt).Set) bool {
+            if (!self.with.intersectWith(other).eql(self.with)) return false;
+            return self.without.intersectWith(other).eql(.initEmpty());
+        }
     };
 }
 
@@ -1502,13 +1550,13 @@ pub const Filter = union(enum) {
         }
     }
 
-    pub fn isArchOnly(comptime self: *const Filter) bool {
+    pub fn IsArchOnly(comptime self: *const Filter) bool {
         switch (self.*) {
             .with, .without => return true,
             .added, .changed => return false,
             .@"or", .@"and" => |children| {
-                for (children) |f| if (!f.isArchOnly()) return false;
-                return false;
+                for (children) |f| if (!f.IsArchOnly()) return false;
+                return true;
             },
         }
     }
@@ -1519,12 +1567,10 @@ pub const Filter = union(enum) {
         comptime self: *const Filter,
         comptime FlagInt: type,
         flags: *HeapFlagSet(FlagInt),
+        inherited: AccessSet(FlagInt),
     ) ![self.BranchCount()]AccessSet(FlagInt) {
-        // const FlagSet = HeapFlagSet(FlagInt);
-        // _ = FlagSet; // autofix
         var out: [self.BranchCount()]AccessSet(FlagInt) = undefined;
-        // @compileLog(comptime self.BranchCount());
-        _ = try self.collectBranches(FlagInt, flags, out[0..], 0, .{});
+        _ = try self.collectBranches(FlagInt, flags, out[0..], 0, inherited);
         return out;
     }
 
@@ -2599,6 +2645,44 @@ fn ComponentRegistry(FlagInt: type) type {
     };
 }
 
+fn ArchScope(FlagInt: type) type {
+    return struct {
+        arch: *ArchType(FlagInt),
+        access: AccessSet(FlagInt),
+    };
+}
+
+fn ArchSopeIter(FlagInt: type) type {
+    return struct {
+        const Self = @This();
+        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        reg: []ArchType(FlagInt),
+        matched_archtypes: []ArchEntry(FlagInt),
+        i: u32 = 0,
+
+        pub fn next(self: *Self) ?ArchScope(FlagInt) {
+            if (self.i >= self.matched_archtypes.len) return null;
+            const next_arch = self.matched_archtypes[self.i];
+
+            self.i += 1;
+            return .{
+                .arch = &self.reg[next_arch.arch_id],
+                .access = next_arch.set,
+            };
+        }
+
+        pub fn checkEntity(self: *Self, entity: Entity) bool {
+            _ = self; // autofix
+            _ = entity; // autofix
+            return false;
+        }
+
+        pub fn reset(self: *@This()) void {
+            self.i = 0;
+        }
+    };
+}
+
 fn ArchIter(FlagInt: type) type {
     return struct {
         const Self = @This();
@@ -2656,45 +2740,72 @@ fn EntityIter(FlagInt: type) type {
 }
 
 //---------------------------------------
-pub fn XQiter(comptime FlagInt: type, comptime Q: type, filter: Filter) type {
-    _ = filter; // autofix
+pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bool) type {
     return struct {
         const Self = @This();
+
         flags: *HeapFlagSet(FlagInt),
-        arch_iter: ArchIter(FlagInt),
-        current: ?*ArchType(FlagInt) = null,
+        arch_iter: ArchSopeIter(FlagInt),
+        current_arch: ?ArchScope(FlagInt) = null,
         offset: usize = 0,
         world_tick: u32,
 
         pub fn next(self: *Self) ?Q {
-            _ = self; // autofix
+            while (true) {
+                if (self.current_arch) |entry| {
+                    if (self.offset >= entry.arch.len) {
+                        self.current_arch = null;
+                        self.offset = 0;
+                        continue;
+                    }
 
-            return null;
-            // while (true) {
-            //     if (self.current) |current_arch| {
-            //         if (self.offset >= current_arch.len) {
-            //             self.current = null;
-            //             self.offset = 0;
-            //             continue;
-            //         }
-            //
-            //         // const next_item = current_arch.getFilteredIndex(self.flags, self.world_tick, self.offset, Q, filter) catch {
-            //         //     self.offset += 1;
-            //         //     continue;
-            //         // };
-            //
-            //         self.offset += 1;
-            //         return next_item;
-            //     }
-            //
-            //     self.current = self.arch_iter.next() orelse return null;
-            //     self.offset = 0;
-            // }
+                    if (!ArchOnly) {
+                        if (!passesTickFilter(entry.arch, &entry.access, self.world_tick, self.offset)) {
+                            self.offset += 1;
+                            continue;
+                        }
+                    }
+
+                    const next_item = entry.arch.getQueryIndex(self.flags, self.offset, Q) catch {
+                        self.offset += 1;
+                        continue;
+                    };
+
+                    self.offset += 1;
+                    return next_item;
+                }
+
+                self.current_arch = self.arch_iter.next() orelse return null;
+                self.offset = 0;
+            }
+        }
+
+        fn passesTickFilter(arch: *ArchType(FlagInt), access: *const AccessSet(FlagInt), tick: u32, index: usize) bool {
+            const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+            if (!access.added.eql(empty)) {
+                var it = access.added.iterator();
+                while (it.next()) |flag| {
+                    const meta = arch.getMeta(flag) orelse continue;
+                    const info = arch.getTickInfo(index, meta);
+                    if (info.added < tick -| 1) return false;
+                }
+            }
+
+            if (!access.changed.eql(empty)) {
+                var it = access.changed.iterator();
+                while (it.next()) |flag| {
+                    const meta = arch.getMeta(flag) orelse continue;
+                    const info = arch.getTickInfo(index, meta);
+                    if (info.changed < tick -| 1) return false;
+                }
+            }
+
+            return true;
         }
 
         pub fn reset(self: *Self) void {
             self.arch_iter.reset();
-            self.current = null;
+            self.current_arch = null;
             self.offset = 0;
         }
 
@@ -2702,9 +2813,9 @@ pub fn XQiter(comptime FlagInt: type, comptime Q: type, filter: Filter) type {
         /// should only be called inside a iteration loop.
         pub fn changed(self: *Self, comptime C: type) void {
             assert(self.offset > 0);
-            assert(self.current != null);
+            assert(self.current_arch != null);
             const index = self.offset - 1; // current iteration
-            self.current.?.upateChanged(self.world_tick, index, C);
+            self.current_arch.?.arch.upateChanged(self.flags, self.world_tick, index, C);
         }
     };
 }
@@ -2754,7 +2865,7 @@ pub fn Qiter(comptime FlagInt: type, comptime Q: type, comptime filter: anytype)
             assert(self.offset > 0);
             assert(self.current != null);
             const index = self.offset - 1; // current iteration
-            self.current.?.upateChanged(self.world_tick, index, C);
+            self.current.?.upateChanged(self.flags, self.world_tick, index, C);
         }
     };
 }
@@ -2963,28 +3074,28 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
     return struct {
         const Self = @This();
         const FlagSet = HeapFlagSet(desc.FlagInt);
+        // access_sets: [filter.BranchCount()]AccessSet(FlagSet),
 
-        exclude: FlagSet.Set,
-        include: FlagSet.Set,
         state: QueryState(desc.FlagInt, QueryStruct, filter),
         reg: *ComponentRegistry(desc.FlagInt),
+
         world_tick: u32,
 
         pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
             _ = world; // autofix
             _ = access; // autofix
+            // access.comp_read_write = access.comp_read_write.unionWith()
             // const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
             // access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
             // access.comp_write = access.comp_write.unionWith(set.write_set);
         }
 
-        pub fn iter(self: *const Self) XQiter(desc.FlagInt, QueryStruct, filter) {
-            return XQiter(desc.FlagInt, QueryStruct, filter){
-                .world_tick = self.world_tick,
+        pub fn iter(self: *const Self) QueryIter(desc.FlagInt, QueryStruct, filter.IsArchOnly()) {
+            return QueryIter(desc.FlagInt, QueryStruct, filter.IsArchOnly()){
                 .flags = &self.reg.component_flags,
-                .arch_iter = ArchIter(desc.FlagInt){
-                    .include = self.include,
-                    .exclude = self.exclude,
+                .world_tick = self.world_tick,
+                .arch_iter = ArchSopeIter(desc.FlagInt){
+                    .matched_archtypes = self.state.matched_archtypes.items,
                     .reg = self.reg.archtypes.items,
                 },
             };
@@ -3021,11 +3132,19 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             // const f = FilterSet.new(filter, desc.FlagInt, &world.components.component_flags);
             // _ = f; // autofix
 
-            const state = try QueryState(desc.FlagInt, QueryStruct, filter).new(&world.components.component_flags);
+            const state = try QueryState(desc.FlagInt, QueryStruct, filter)
+                .new(
+                world.memtator.world(),
+                &world.components.component_flags,
+                world.components.archtypes.items,
+                world.world_tick,
+            );
+
+            // load cached state
+            // 1.) gen query hash
+            // 2.) Lookup table to cached state
 
             return Self{
-                .exclude = undefined,
-                .include = undefined,
                 .reg = &world.components,
                 .world_tick = world.world_tick,
                 .state = state,
