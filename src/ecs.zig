@@ -465,7 +465,6 @@ pub fn App(comptime desc: AppDesc) type {
                 last_run_tick: u32 = 0,
             };
 
-
             pub const Schedule = struct {
                 systems: std.ArrayList(struct {
                     id: SystemID,
@@ -609,7 +608,9 @@ pub fn App(comptime desc: AppDesc) type {
                                 };
 
                                 if (@hasDecl(PT, "fromLocal")) {
-                                    @field(sys_args, cprint("{d}", .{i})) = try PT.fromLocal(world, locals);
+                                    var ret = try PT.fromLocal(world, locals);
+                                    if (@hasDecl(PT, "setWorldTick")) ret.setWorldTick(last_run_tick);
+                                    @field(sys_args, cprint("{d}", .{i})) = ret;
                                     continue;
                                 }
 
@@ -1352,9 +1353,10 @@ pub fn App(comptime desc: AppDesc) type {
     };
 }
 
-fn ArchEntry(FlagInt: type) type {
-    return struct { arch_id: u32, set: AccessSet(FlagInt) };
-}
+const ArchEntry = struct {
+    arch_id: u32,
+    set: u32,
+};
 
 /// cached querry values, that only need to compute once
 fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
@@ -1366,7 +1368,7 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         // ---------------
         created_on: u64 = 0,
         access_sets: [F.BranchCount()]AccessSet(FlagInt) = undefined,
-        matched_archtypes: std.ArrayList(ArchEntry(FlagInt)) = .{},
+        matched_archtypes: std.ArrayList(ArchEntry) = .{},
         last_update: u32 = 0,
 
         required: FlagSet.Set = .initEmpty(),
@@ -1436,6 +1438,7 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
             state.created_on = tick;
 
             try state.build_match(gpa, archtypes);
+            state.last_update = @intCast(archtypes.len);
 
             return state;
         }
@@ -1443,11 +1446,11 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         pub fn build_match(self: *Self, gpa: std.mem.Allocator, arches: []const ArchType(FlagInt)) !void {
             self.matched_archtypes.clearRetainingCapacity();
             blk: for (arches, 0..) |*arch, i| {
-                for (self.access_sets) |access| {
+                for (self.access_sets, 0..) |access, s| {
                     if (access.matches(arch.mask)) {
                         try self.matched_archtypes.append(gpa, .{
                             .arch_id = @intCast(i),
-                            .set = access,
+                            .set = @intCast(s),
                         });
                         continue :blk;
                     }
@@ -2162,8 +2165,8 @@ fn ArchType(FlagInt: type) type {
         }
 
         pub inline fn getMeta(self: *Self, flag: CompFlag) ?*const ColMeta {
-            const index = self.column_lookup.get(flag) orelse return null;
-            return &self.columns.items[index];
+            for (self.columns.items) |*col| if (col.flag == flag) return col;
+            return null;
         }
 
         pub inline fn getMetaByHash(self: *const Self, hash: u32) ?*const ColMeta {
@@ -2314,8 +2317,8 @@ fn ArchType(FlagInt: type) type {
                     else => @compileError("Type not allowed: " ++ field.name),
                 };
 
-                const flag = flags.getFlag(field_ptr.child);
-                if (self.getMeta(flag)) |meta| {
+                const hash = comptime hashType(field_ptr.child);
+                if (self.getMetaByHash(hash)) |meta| {
                     if (field_ptr.is_const) {
                         const raw_bytes = self.getSingleRawConst(index, meta);
                         @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
@@ -2607,7 +2610,7 @@ fn ComponentRegistry(FlagInt: type) type {
 fn ArchScope(FlagInt: type) type {
     return struct {
         arch: *ArchType(FlagInt),
-        access: AccessSet(FlagInt),
+        access: *const AccessSet(FlagInt),
     };
 }
 
@@ -2615,8 +2618,10 @@ fn ArchSopeIter(FlagInt: type) type {
     return struct {
         const Self = @This();
         const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+
         reg: []ArchType(FlagInt),
-        matched_archtypes: []ArchEntry(FlagInt),
+        sets: []const AccessSet(FlagInt),
+        matched_archtypes: []ArchEntry,
         i: u32 = 0,
 
         pub fn next(self: *Self) ?ArchScope(FlagInt) {
@@ -2626,14 +2631,8 @@ fn ArchSopeIter(FlagInt: type) type {
             self.i += 1;
             return .{
                 .arch = &self.reg[next_arch.arch_id],
-                .access = next_arch.set,
+                .access = &self.sets[next_arch.set],
             };
-        }
-
-        pub fn checkEntity(self: *Self, entity: Entity) bool {
-            _ = self; // autofix
-            _ = entity; // autofix
-            return false;
         }
 
         pub fn reset(self: *@This()) void {
@@ -2702,6 +2701,7 @@ fn EntityIter(FlagInt: type) type {
 pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bool) type {
     return struct {
         const Self = @This();
+        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
 
         flags: *HeapFlagSet(FlagInt),
         arch_iter: ArchSopeIter(FlagInt),
@@ -2719,7 +2719,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bo
                     }
 
                     if (!ArchOnly) {
-                        if (!passesTickFilter(entry.arch, &entry.access, self.world_tick, self.offset)) {
+                        if (!passesTickFilter(entry.arch, entry.access, self.world_tick, self.offset)) {
                             self.offset += 1;
                             continue;
                         }
@@ -2739,8 +2739,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bo
             }
         }
 
-        fn passesTickFilter(arch: *ArchType(FlagInt), access: *const AccessSet(FlagInt), tick: u32, index: usize) bool {
-            const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        inline fn passesTickFilter(arch: *ArchType(FlagInt), access: *const AccessSet(FlagInt), tick: u32, index: usize) bool {
 
             if (!access.added.eql(empty)) {
                 var it = access.added.iterator();
@@ -3036,18 +3035,34 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
         const FlagSet = HeapFlagSet(desc.FlagInt);
         // access_sets: [filter.BranchCount()]AccessSet(FlagSet),
 
-        state: QueryState(desc.FlagInt, QueryStruct, filter),
+        state: *QueryState(desc.FlagInt, QueryStruct, filter),
         reg: *ComponentRegistry(desc.FlagInt),
 
         world_tick: u32,
 
         pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
-            _ = world; // autofix
-            _ = access; // autofix
-            // access.comp_read_write = access.comp_read_write.unionWith()
-            // const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
-            // access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
-            // access.comp_write = access.comp_write.unionWith(set.write_set);
+            const flags = &world.components.component_flags;
+            const QueryInfo = @typeInfo(QueryStruct);
+            inline for (QueryInfo.@"struct".fields) |field| {
+                switch (@typeInfo(field.type)) {
+                    .optional => |opt| {
+                        switch (@typeInfo(opt.child)) {
+                            .pointer => |ptr| {
+                                const comp_id = flags.getFlag(ptr.child);
+                                access.comp_read_write.insert(comp_id);
+                                if (!ptr.is_const) access.comp_write.insert(comp_id);
+                            },
+                            else => {},
+                        }
+                    },
+                    .pointer => |ptr| {
+                        const comp_id = flags.getFlag(ptr.child);
+                        access.comp_read_write.insert(comp_id);
+                        if (!ptr.is_const) access.comp_write.insert(comp_id);
+                    },
+                    else => {},
+                }
+            }
         }
 
         pub fn iter(self: *const Self) QueryIter(desc.FlagInt, QueryStruct, filter.IsArchOnly()) {
@@ -3057,6 +3072,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
                 .arch_iter = ArchSopeIter(desc.FlagInt){
                     .matched_archtypes = self.state.matched_archtypes.items,
                     .reg = self.reg.archtypes.items,
+                    .sets = &self.state.access_sets,
                 },
             };
         }
@@ -3075,34 +3091,32 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
 
         /// totoal entity count for query
         pub fn count(self: *const Self) usize {
-            var it = ArchIter(desc.FlagInt){
-                .include = self.include,
-                .exclude = self.exclude,
-                .reg = self.reg.archtypes.items,
-            };
-
             var c: usize = 0;
-            while (it.next()) |arch| c += arch.len;
+            for (self.state.matched_archtypes.items) |entry| {
+                c += self.reg.archtypes.items[entry.arch_id].len;
+            }
             return c;
         }
 
-        pub fn fromWorld(world: *App(desc)) EcsError!Self {
-            // const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
-            // _ = set; // autofix
-            // const f = FilterSet.new(filter, desc.FlagInt, &world.components.component_flags);
-            // _ = f; // autofix
+        pub fn setWorldTick(self: *Self, tick: u32) void {
+            self.world_tick = tick;
+        }
 
-            const state = try QueryState(desc.FlagInt, QueryStruct, filter)
-                .new(
-                world.memtator.world(),
-                &world.components.component_flags,
-                world.components.archtypes.items,
-                world.world_tick,
-            );
+        pub fn fromLocal(world: *App(desc), locals: *ResourceRegistry(desc.FlagInt)) EcsError!Self {
+            const QS = QueryState(desc.FlagInt, QueryStruct, filter);
+            const state: *QS = try locals.getOrDefault(world.memtator.world(), QS);
 
-            // load cached state
-            // 1.) gen query hash
-            // 2.) Lookup table to cached state
+            if (state.created_on == 0) {
+                state.* = try QS.new(
+                    world.memtator.world(),
+                    &world.components.component_flags,
+                    world.components.archtypes.items,
+                    world.world_tick,
+                );
+            } else if (state.last_update < world.components.archtypes.items.len) {
+                try state.build_match(world.memtator.world(), world.components.archtypes.items);
+                state.last_update = @intCast(world.components.archtypes.items.len);
+            }
 
             return Self{
                 .reg = &world.components,
