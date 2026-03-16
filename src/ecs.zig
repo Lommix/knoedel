@@ -1,4 +1,4 @@
-//*********************************************************
+
 // Knödel v0.1 - tiny single file ECS.                    *
 // 2025 Lorenz Mielke - https://github.com/Lommix/knoedel *
 //*********************************************************
@@ -1330,11 +1330,16 @@ pub fn App(comptime desc: AppDesc) type {
         /// A query accepting a query struct directly
         /// `customers: QueryS(struct{c: *Customer, t: *const Transform})`
         pub fn QueryS(comptime Q: type) type {
+            // return IQueryStructFilteredNew(desc, Q, .empty);
             return IQueryStructFiltered(desc, Q, .{});
         }
 
-        pub fn QueryX(comptime Q: type, filter: Filter) type {
+        pub fn QueryXF(comptime Q: type, filter: Filter) type {
             return IQueryStructFilteredNew(desc, Q, filter);
+        }
+
+        pub fn QueryX(comptime Q: type) type {
+            return IQueryStructFilteredNew(desc, Q, .empty);
         }
 
         /// ## SystemParams
@@ -1402,7 +1407,7 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
                         include.insert(comp_id);
                         if (!ptr.is_const) write_mask.insert(comp_id);
                     },
-                    .@"enum" => {},
+                    .@"enum", .@"struct" => {},
                     else => @compileError("not allowed"),
                 }
             }
@@ -1472,6 +1477,7 @@ pub const Filter = union(enum) {
     changed: u32,
     @"and": []const Filter,
     @"or": []const Filter,
+    empty,
 
     pub const Branch = struct { a: *const Filter, b: *const Filter };
 
@@ -1489,7 +1495,7 @@ pub const Filter = union(enum) {
     /// the dnf count
     pub fn BranchCount(comptime self: *const Filter) u32 {
         switch (self.*) {
-            .with, .without, .added, .changed => return 1,
+            .with, .without, .added, .changed, .empty => return 1,
             .@"and" => |children| {
                 var product: u32 = 1;
                 for (children) |child| product *= child.BranchCount();
@@ -1505,13 +1511,101 @@ pub const Filter = union(enum) {
 
     pub fn IsArchOnly(comptime self: *const Filter) bool {
         switch (self.*) {
-            .with, .without => return true,
+            .with, .without, .empty => return true,
             .added, .changed => return false,
             .@"or", .@"and" => |children| {
                 for (children) |f| if (!f.IsArchOnly()) return false;
                 return true;
             },
         }
+    }
+
+    const TickHashes = struct {
+        added: []const u32,
+        changed: []const u32,
+    };
+
+    /// Returns per-branch added/changed hashes, computed entirely at comptime.
+    pub fn comptimeBranchTicks(comptime self: *const Filter) [self.BranchCount()]TickHashes {
+        var out: [self.BranchCount()]TickHashes = undefined;
+        for (&out) |*o| {
+            o.added = &.{};
+            o.changed = &.{};
+        }
+        _ = self.collectTickBranches(&out, 0, &.{}, &.{});
+        return out;
+    }
+
+    fn collectTickBranches(
+        comptime self: *const Filter,
+        out: *[self.BranchCount()]TickHashes,
+        comptime offset: usize,
+        comptime inherited_added: []const u32,
+        comptime inherited_changed: []const u32,
+    ) usize {
+        switch (self.*) {
+            .added => |hash| {
+                out[offset] = .{
+                    .added = inherited_added ++ &[_]u32{hash},
+                    .changed = inherited_changed,
+                };
+                return offset + 1;
+            },
+            .changed => |hash| {
+                out[offset] = .{
+                    .added = inherited_added,
+                    .changed = inherited_changed ++ &[_]u32{hash},
+                };
+                return offset + 1;
+            },
+            .with, .without => {
+                out[offset] = .{
+                    .added = inherited_added,
+                    .changed = inherited_changed,
+                };
+                return offset + 1;
+            },
+            .@"and" => |children| {
+                return andTickBranches(children, 0, out, offset, inherited_added, inherited_changed);
+            },
+            .@"or" => |children| {
+                var off = offset;
+                inline for (children) |child| {
+                    off = child.collectTickBranches(out, off, inherited_added, inherited_changed);
+                }
+                return off;
+            },
+            .empty => return offset,
+        }
+    }
+
+    fn andTickBranches(
+        comptime children: []const Filter,
+        comptime idx: usize,
+        out: anytype,
+        comptime offset: usize,
+        comptime inherited_added: []const u32,
+        comptime inherited_changed: []const u32,
+    ) usize {
+        if (comptime idx >= children.len) {
+            out[offset] = .{
+                .added = inherited_added,
+                .changed = inherited_changed,
+            };
+            return offset + 1;
+        }
+        const child = comptime &children[idx];
+        comptime var child_branches: [child.BranchCount()]TickHashes = undefined;
+        for (&child_branches) |*cb| {
+            cb.added = &.{};
+            cb.changed = &.{};
+        }
+        _ = child.collectTickBranches(&child_branches, 0, inherited_added, inherited_changed);
+        var off = offset;
+        inline for (0..comptime child.BranchCount()) |i| {
+            off = andTickBranches(children, idx + 1, out, off, child_branches[i].added, child_branches[i].changed);
+        }
+        return off;
     }
 
     // Creates a DNF representation: one AccessSet per OR-branch.
@@ -1578,6 +1672,10 @@ pub const Filter = union(enum) {
                     off = try child.collectBranches(FlagInt, flags, out, off, inherited);
                 }
                 return off;
+            },
+            .empty => {
+                out[offset] = inherited;
+                return offset + 1;
             },
         }
     }
@@ -2601,7 +2699,7 @@ fn ComponentRegistry(FlagInt: type) type {
 fn ArchScope(FlagInt: type) type {
     return struct {
         arch: *ArchType(FlagInt),
-        access: *const AccessSet(FlagInt),
+        set_id: u32,
     };
 }
 
@@ -2611,7 +2709,6 @@ fn ArchSopeIter(FlagInt: type) type {
         const empty = HeapFlagSet(FlagInt).Set.initEmpty();
 
         reg: []ArchType(FlagInt),
-        sets: []const AccessSet(FlagInt),
         matched_archtypes: []ArchEntry,
         i: u32 = 0,
 
@@ -2622,7 +2719,7 @@ fn ArchSopeIter(FlagInt: type) type {
             self.i += 1;
             return .{
                 .arch = &self.reg[next_arch.arch_id],
-                .access = &self.sets[next_arch.set_id],
+                .set_id = next_arch.set_id,
             };
         }
 
@@ -2689,7 +2786,10 @@ fn EntityIter(FlagInt: type) type {
 }
 
 //---------------------------------------
-pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bool) type {
+pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *const Filter) type {
+    const ArchOnly = filter.IsArchOnly();
+    const branch_ticks = comptime filter.comptimeBranchTicks();
+
     return struct {
         const Self = @This();
         const empty = HeapFlagSet(FlagInt).Set.initEmpty();
@@ -2710,7 +2810,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bo
                     }
 
                     if (!ArchOnly) {
-                        if (!passesTickFilter(entry.arch, entry.access, self.world_tick, self.offset)) {
+                        if (!passesTickFilter(entry.arch, entry.set_id, self.world_tick, self.offset)) {
                             self.offset += 1;
                             continue;
                         }
@@ -2730,19 +2830,21 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime ArchOnly: bo
             }
         }
 
-        inline fn passesTickFilter(arch: *ArchType(FlagInt), access: *const AccessSet(FlagInt), tick: u32, index: usize) bool {
-            var it = access.added.iterator();
-            while (it.next()) |flag| {
-                const meta = arch.getMeta(flag) orelse continue;
-                const info = arch.getTickInfo(index, meta);
-                if (info.added < tick -| 1) return false;
-            }
-
-            it = access.changed.iterator();
-            while (it.next()) |flag| {
-                const meta = arch.getMeta(flag) orelse continue;
-                const info = arch.getTickInfo(index, meta);
-                if (info.changed < tick -| 1) return false;
+        inline fn passesTickFilter(arch: *ArchType(FlagInt), set_id: u32, tick: u32, index: usize) bool {
+            inline for (branch_ticks, 0..) |branch, i| {
+                if (set_id == i) {
+                    inline for (branch.added) |hash| {
+                        const meta = arch.getMetaByHash(hash) orelse return true;
+                        const info = arch.getTickInfo(index, meta);
+                        if (info.added < tick -| 1) return false;
+                    }
+                    inline for (branch.changed) |hash| {
+                        const meta = arch.getMetaByHash(hash) orelse return true;
+                        const info = arch.getTickInfo(index, meta);
+                        if (info.changed < tick -| 1) return false;
+                    }
+                    return true;
+                }
             }
             return true;
         }
@@ -3018,11 +3120,9 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
     return struct {
         const Self = @This();
         const FlagSet = HeapFlagSet(desc.FlagInt);
-        // access_sets: [filter.BranchCount()]AccessSet(FlagSet),
 
         state: *QueryState(desc.FlagInt, QueryStruct, filter),
         reg: *ComponentRegistry(desc.FlagInt),
-
         world_tick: u32,
 
         pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
@@ -3050,14 +3150,13 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             }
         }
 
-        pub fn iter(self: *const Self) QueryIter(desc.FlagInt, QueryStruct, filter.IsArchOnly()) {
-            return QueryIter(desc.FlagInt, QueryStruct, filter.IsArchOnly()){
+        pub fn iter(self: *const Self) QueryIter(desc.FlagInt, QueryStruct, &filter) {
+            return QueryIter(desc.FlagInt, QueryStruct, &filter){
                 .flags = &self.reg.component_flags,
                 .world_tick = self.world_tick,
                 .arch_iter = ArchSopeIter(desc.FlagInt){
                     .matched_archtypes = self.state.matched_archtypes.items,
                     .reg = self.reg.archtypes.items,
-                    .sets = &self.state.access_sets,
                 },
             };
         }
