@@ -1,6 +1,8 @@
-// Knödel v0.1 - tiny single file ECS.                    *
-// 2025 Lorenz Mielke - https://github.com/Lommix/knoedel *
-//*********************************************************
+//***********************************************************
+// Knödel v0.1 - full zig ECS
+// @Author Lorenz Mielke - https://github.com/Lommix/knoedel
+// 2025
+//***********************************************************
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,9 +14,11 @@ pub const GB: usize = MB * 1000;
 
 /// ECS configuration
 pub const AppDesc = struct {
+    /// how many cores ? (set it to 1 for web)
     thread_count: comptime_int = 8,
+    /// frame arena max size
     max_frame_mem: usize = 64 * MB,
-    // TODO: defines max components and resources bit sets u6 = 64 Components max
+    /// defines max components and resources bit sets u6 = 64 Components max
     FlagInt: type = u6,
 };
 
@@ -1317,7 +1321,6 @@ pub fn App(comptime desc: AppDesc) type {
             ptr: *anyopaque,
             run: CommandFn,
         };
-
 
         pub fn QueryF(comptime Q: type, filter: Filter) type {
             return IQueryStructFilteredNew(desc, Q, filter);
@@ -2739,7 +2742,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *con
                     inline for (branch.added) |hash| {
                         const meta = arch.getMetaByHash(hash) orelse return true;
                         const info = arch.getTickInfo(index, meta);
-                        if (info.added < tick -| 1) return false;
+                        if (info.added < tick) return false;
                     }
                     inline for (branch.changed) |hash| {
                         const meta = arch.getMetaByHash(hash) orelse return true;
@@ -3072,10 +3075,19 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
 
         pub fn get(self: *const Self, entity: Entity) EcsError!QueryStruct {
             const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+
+            var found = false;
+            for (self.state.matched_archtypes.items) |*en| {
+                if (en.arch_id == arch_id) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) return error.EntityNotFound;
+
             const arch = &self.reg.archtypes.items[arch_id];
             const index = arch.entity_lookup.get(entity).?;
-
-            // add back filter
 
             return arch.getQueryIndex(&self.reg.component_flags, index, QueryStruct);
         }
