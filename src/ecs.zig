@@ -1318,20 +1318,6 @@ pub fn App(comptime desc: AppDesc) type {
             run: CommandFn,
         };
 
-        /// ## SystemParams
-        /// A query accepting a tuple of types
-        /// `customers: Query(.{Transform, Mut(Customer)})`
-        pub fn View(query: anytype) type {
-            return IQueryFiltered(desc, query, .{});
-        }
-
-        /// ## SystemParams
-        /// A query accepting a query struct directly
-        /// `customers: QueryS(struct{c: *Customer, t: *const Transform})`
-        pub fn QueryS(comptime Q: type) type {
-            // return IQueryStructFilteredNew(desc, Q, .empty);
-            return IQueryStructFiltered(desc, Q, .{});
-        }
 
         pub fn QueryF(comptime Q: type, filter: Filter) type {
             return IQueryStructFilteredNew(desc, Q, filter);
@@ -1339,20 +1325,6 @@ pub fn App(comptime desc: AppDesc) type {
 
         pub fn Query(comptime Q: type) type {
             return IQueryStructFilteredNew(desc, Q, .empty);
-        }
-
-        /// ## SystemParams
-        /// A query accepting a tuple of types with filter
-        /// `customers: Query(.{Transform, Mut(Customer)}, .{With(Visible)})`
-        pub fn ViewFiltered(query: anytype, filter: anytype) type {
-            return IQueryFiltered(desc, query, filter);
-        }
-
-        /// ## SystemParams
-        /// A query accepting a query struct directly and a filter AND tuple
-        /// `customers: QuerySFiltered(struct{c: *Customer, t: *const Transform}, .{With(Visible)})`
-        pub fn QuerySFiltered(comptime Q: type, filter: anytype) type {
-            return IQueryStructFiltered(desc, Q, filter);
         }
     };
 }
@@ -1616,30 +1588,40 @@ pub const Filter = union(enum) {
         switch (self.*) {
             .added => |hash| {
                 var s = inherited;
-                const flag = flags.getFlagFromHash(hash) orelse return error.ComponentNotFound;
-                s.with.insert(flag);
-                s.added.insert(flag);
+                if (flags.getFlagFromHash(hash)) |flag| {
+                    s.with.insert(flag);
+                    s.added.insert(flag);
+                } else {
+                    s.without = .initFull();
+                }
                 out[offset] = s;
                 return offset + 1;
             },
             .changed => |hash| {
                 var s = inherited;
-                const flag = flags.getFlagFromHash(hash) orelse return error.ComponentNotFound;
-                s.with.insert(flag);
-                s.changed.insert(flag);
+                if (flags.getFlagFromHash(hash)) |flag| {
+                    s.with.insert(flag);
+                    s.changed.insert(flag);
+                } else {
+                    s.without = .initFull();
+                }
+
                 out[offset] = s;
                 return offset + 1;
             },
             .with => |hash| {
                 var s = inherited;
-                const flag = flags.getFlagFromHash(hash) orelse return error.ComponentNotFound;
-                s.with.insert(flag);
+                if (flags.getFlagFromHash(hash)) |flag| {
+                    s.with.insert(flag);
+                } else {
+                    s.without = .initFull();
+                }
                 out[offset] = s;
                 return offset + 1;
             },
             .without => |hash| {
                 var s = inherited;
-                if (flags.getFlagFromHash(hash))|flag|{
+                if (flags.getFlagFromHash(hash)) |flag| {
                     s.without.insert(flag);
                 }
                 out[offset] = s;
@@ -1735,13 +1717,6 @@ pub fn Local(comptime T: type) type {
     };
 }
 
-pub fn Mut(comptime T: type) type {
-    return struct {
-        const _is_mut: bool = true;
-        const inner = T;
-    };
-}
-
 pub fn Has(comptime T: type) type {
     return struct {
         const _is_has: bool = true;
@@ -1758,40 +1733,6 @@ pub fn Chain(comptime T: anytype) type {
     return struct {
         pub const _is_chain: bool = true;
         const inner: @TypeOf(T) = T;
-    };
-}
-
-/// # values you triggered `changed` on in the since last system run.
-/// You have to manually poll `iter.changed(type)` on query iterations for `changed` to be active.
-/// sry, derefMut traits in zig are very ugly/boiler heavy.
-pub fn Changed(comptime C: type) type {
-    return struct {
-        const inner = C;
-        const _is_changed: bool = true;
-    };
-}
-
-/// # Comp that was added since last system run
-pub fn Added(comptime C: type) type {
-    return struct {
-        const inner = C;
-        const _is_added: bool = true;
-    };
-}
-
-/// # simple with filter
-pub fn With(comptime C: type) type {
-    return struct {
-        const inner = C;
-        const _is_with: bool = true;
-    };
-}
-
-/// # simple without filter
-pub fn WithOut(comptime C: type) type {
-    return struct {
-        const inner = C;
-        const _is_without: bool = true;
     };
 }
 
@@ -2326,33 +2267,6 @@ fn ArchType(FlagInt: type) type {
             clone.columns = try self.columns.clone(gpa);
             clone.chunk_size = self.chunk_size;
             return clone;
-        }
-
-        /// Query struct by index with tick filter
-        pub fn getFilteredIndex(
-            self: *Self,
-            flags: *HeapFlagSet(FlagInt),
-            tick: u32,
-            index: usize,
-            comptime Q: type,
-            comptime filter: anytype,
-        ) EcsError!Q {
-            inline for (filter) |comp| {
-                if (@hasDecl(comp, "_is_changed")) {
-                    const flag = flags.getFlag(comp.inner);
-                    const meta = self.getMeta(flag).?;
-                    const info = self.getTickInfo(index, meta);
-                    if (info.changed < tick -| 1) return EcsError.EntityNotFound;
-                }
-                if (@hasDecl(comp, "_is_added")) {
-                    const flag = flags.getFlag(comp.inner);
-                    const meta = self.getMeta(flag).?;
-                    const info = self.getTickInfo(index, meta);
-                    if (info.added < tick -| 1) return EcsError.EntityNotFound;
-                }
-            }
-
-            return self.getQueryIndex(flags, index, Q);
         }
 
         /// Query struct by index
@@ -3218,287 +3132,6 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
                 .world_tick = world.world_tick,
                 .state = state,
             };
-        }
-    };
-}
-
-pub fn IQueryStructFiltered(comptime desc: AppDesc, comptime QueryStruct: type, comptime filter: anytype) type {
-    return struct {
-        const Self = @This();
-        const FlagSet = HeapFlagSet(desc.FlagInt);
-
-        exclude: FlagSet.Set,
-        include: FlagSet.Set,
-        reg: *ComponentRegistry(desc.FlagInt),
-        world_tick: u32,
-
-        pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
-            const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
-            access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
-            access.comp_write = access.comp_write.unionWith(set.write_set);
-        }
-
-        pub fn iter(self: *const Self) Qiter(desc.FlagInt, QueryStruct, filter) {
-            return Qiter(desc.FlagInt, QueryStruct, filter){
-                .world_tick = self.world_tick,
-                .flags = &self.reg.component_flags,
-                .arch_iter = ArchIter(desc.FlagInt){
-                    .include = self.include,
-                    .exclude = self.exclude,
-                    .reg = self.reg.archtypes.items,
-                },
-            };
-        }
-
-        pub fn first(self: *const Self) ?QueryStruct {
-            var it = self.iter();
-            return it.next();
-        }
-
-        pub fn get(self: *const Self, entity: Entity) EcsError!QueryStruct {
-            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-            const arch = &self.reg.archtypes.items[arch_id];
-            const index = arch.entity_lookup.get(entity).?;
-            return arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, QueryStruct, filter);
-        }
-
-        /// totoal entity count for query
-        pub fn count(self: *const Self) usize {
-            var it = ArchIter(desc.FlagInt){
-                .include = self.include,
-                .exclude = self.exclude,
-                .reg = self.reg.archtypes.items,
-            };
-
-            var c: usize = 0;
-            while (it.next()) |arch| c += arch.len;
-            return c;
-        }
-
-        pub fn fromWorld(world: *App(desc)) EcsError!Self {
-            const set = extractQuerySetsFromEntry(desc, world, QueryStruct, filter);
-            return Self{
-                .exclude = set.exclude_set,
-                .include = set.include_set,
-                .reg = &world.components,
-                .world_tick = world.world_tick,
-            };
-        }
-    };
-}
-
-pub fn IQueryFiltered(comptime desc: AppDesc, comptime query: anytype, comptime filter: anytype) type {
-    return struct {
-        const Self = @This();
-        const FlagSet = HeapFlagSet(desc.FlagInt);
-
-        exclude: FlagSet.Set,
-        include: FlagSet.Set,
-        reg: *ComponentRegistry(desc.FlagInt),
-        world_tick: u32,
-
-        inline fn SelfValidate() void {
-            const query_type = @TypeOf(query);
-            if (!isTuple(query_type)) {
-                @compileError("Filter must be a tuple!");
-            }
-
-            const filter_type = @TypeOf(filter);
-            if (!isTuple(filter_type)) {
-                @compileError("Filter must be a tuple!");
-            }
-        }
-
-        /// comptime query validation
-        inline fn validate_query(comptime Q: type) void {
-            for (@typeInfo(Q).@"struct".fields) |field| {
-                const info = @typeInfo(field.type);
-                if (field.type == Entity) continue;
-
-                const field_ptr = switch (info) {
-                    .optional => |opt| switch (@typeInfo(opt.child)) {
-                        .pointer => |p| p,
-                        else => @compileError("non pointer type is not allowed in query " ++ field.name),
-                    },
-                    .pointer => |p| p,
-                    else => @compileError("non pointer type is not allowed in query " ++ field.name),
-                };
-
-                if (field_ptr.is_const) {
-                    if (!IsRead(field_ptr.child, query)) {
-                        @compileError("Component not in query! field: `" ++ field.name ++ "` type:" ++ @typeName(field_ptr.child));
-                    }
-                } else {
-                    if (!IsWrite(field_ptr.child, query)) {
-                        @compileError("Component not mutable in query! field: `" ++ field.name ++ "` type:" ++ @typeName(field_ptr.child));
-                    }
-                }
-            }
-        }
-
-        pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
-            const set = extractQuerySets(desc, world, query, filter);
-            access.comp_read_write = access.comp_read_write.unionWith(set.read_set);
-            access.comp_write = access.comp_write.unionWith(set.write_set);
-        }
-
-        /// query iterate, expects a struct of component references
-        /// Example: `var itr = query.iterQ(struct{entity: kn.Entity, my_comp: *const MyComp});`
-        pub fn iterQ(self: *const Self, comptime Q: type) Qiter(desc.FlagInt, Q, filter) {
-            comptime validate_query(Q);
-            return Qiter(desc.FlagInt, Q, filter){
-                .world_tick = self.world_tick,
-                .flags = &self.reg.component_flags,
-                .arch_iter = ArchIter(desc.FlagInt){
-                    .include = self.include,
-                    .exclude = self.exclude,
-                    .reg = self.reg.archtypes.items,
-                },
-            };
-        }
-
-        /// single mut component iterator over query.
-        /// Example: `var itr = query.iterC(Transform);`
-        pub fn iterC(self: *const Self, comptime C: type) Citer(C, true, filter) {
-            comptime validate_query(struct { c: *C });
-            return Citer(C, true, filter){
-                .world_tick = self.world_tick,
-                .arch_iter = ArchIter(desc.FlagInt){
-                    .include = self.include,
-                    .exclude = self.exclude,
-                    .reg = self.reg.archtypes.items,
-                },
-            };
-        }
-
-        /// single const component iterator over query.
-        /// Example: `var itr = query.iterConstC(Transform);`
-        pub fn iterConstC(self: *const Self, comptime C: type) Citer(C, false, filter) {
-            comptime validate_query(struct { c: *const C });
-            return Citer(C, false, filter){
-                .world_tick = self.world_tick,
-                .arch_iter = ArchIter(desc.FlagInt){
-                    .include = self.include,
-                    .exclude = self.exclude,
-                    .reg = self.reg.archtypes.items,
-                },
-            };
-        }
-
-        /// returns the first entry
-        /// Example: `const entry = query.firstQ(struct{entity: kn.Entity, my_comp: *const MyComp}).?;`
-        pub fn firstQ(self: *const Self, comptime Q: type) ?Q {
-            comptime validate_query(Q);
-            var it = self.iterQ(Q);
-            return it.next();
-        }
-
-        /// returns a component ptr of the first entry
-        /// Example: `const transform: *Transform = query.firstC(Transform).?;`
-        pub fn firstC(self: *const Self, comptime C: type) ?*C {
-            if (isTuple(C)) @compileError("`firstC` only takes a single component type, not tuples");
-            const Query = struct { c: *C };
-            comptime validate_query(Query);
-            const en = self.firstQ(Query) orelse return null;
-            return en.c;
-        }
-
-        /// returns a const component ptr of the first entry
-        /// Example: `const transform: *const Transform = query.firstC(Transform).?;`
-        pub fn firstConstC(self: *const Self, comptime C: type) ?*const C {
-            if (isTuple(C)) @compileError("`firstConstC` only takes a single component type, not tuples");
-            const Query = struct { c: *const C };
-            comptime validate_query(Query);
-            const en = self.firstQ(Query) orelse return null;
-            return en.c;
-        }
-
-        /// iterator over the entites
-        pub fn iterEntity(self: *const Self) EntityIter(desc.FlagInt) {
-            return EntityIter(desc.FlagInt){
-                .arch_iter = ArchIter(desc.FlagInt){
-                    .include = self.include,
-                    .exclude = self.exclude,
-                    .reg = self.reg.archtypes.items,
-                },
-            };
-        }
-
-        /// totoal entity count for query
-        pub fn count(self: *const Self) usize {
-            var iter = ArchIter(desc.FlagInt){
-                .include = self.include,
-                .exclude = self.exclude,
-                .reg = self.reg.archtypes.items,
-            };
-
-            var c: usize = 0;
-            while (iter.next()) |arch| c += arch.len;
-            return c;
-        }
-
-        /// marks a component as `changed`
-        /// triggers query filter `Changed(comptime C:type)`
-        pub fn changed(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
-            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-            const arch = &self.reg.archtypes.items[arch_id];
-            const index = arch.entity_lookup.get(entity).?; // orelse return EcsError.EntityNotFound;
-            arch.upateChanged(self.world_tick, index, C);
-        }
-
-        /// get query entry single
-        pub fn getQ(self: *const Self, entity: Entity, comptime Q: type) EcsError!Q {
-            comptime validate_query(Q);
-            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-            const arch = &self.reg.archtypes.items[arch_id];
-            const index = arch.entity_lookup.get(entity).?;
-            return arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, Q, filter);
-        }
-
-        /// get component entry single
-        pub fn getC(self: *const Self, entity: Entity, comptime C: type) EcsError!*C {
-            const Query = struct { c: *C };
-            comptime validate_query(Query);
-            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-            const arch = &self.reg.archtypes.items[arch_id];
-            const index = arch.entity_lookup.get(entity).?;
-            const entry = try arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, Query, filter);
-            return entry.c;
-        }
-
-        /// get component entry single
-        pub fn getConstC(self: *const Self, entity: Entity, comptime C: type) EcsError!*const C {
-            const Query = struct { c: *const C };
-            comptime validate_query(Query);
-            const arch_id = self.reg.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
-            const arch = &self.reg.archtypes.items[arch_id];
-            const index = arch.entity_lookup.get(entity).?;
-            const entry = try arch.getFilteredIndex(&self.reg.component_flags, self.world_tick, index, Query, filter);
-            return entry.c;
-        }
-
-        pub fn fromWorld(world: *App(desc)) EcsError!Self {
-            const set = extractQuerySets(desc, world, query, filter);
-            return Self{
-                .exclude = set.exclude_set,
-                .include = set.include_set,
-                .reg = &world.components,
-                .world_tick = world.world_tick,
-            };
-        }
-
-        /// empty placeholder query
-        pub fn empty(world: *App(desc)) Self {
-            return Self{
-                .reg = &world.components,
-                .exclude = HeapFlagSet(desc.FlagInt).Set.initEmpty(),
-                .include = HeapFlagSet(desc.FlagInt).Set.initEmpty(),
-                .world_tick = world.world_tick,
-            };
-        }
-
-        pub fn setWorldTick(self: *Self, tick: u32) void {
-            self.world_tick = tick;
         }
     };
 }
