@@ -9,24 +9,18 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const GB = ecs.GB;
         pub const App = ecs.App(cfg);
         pub const Entity = ecs.Entity;
-        pub const Mut = ecs.Mut;
         pub const Has = ecs.Has;
         pub const Res = App.Res;
         pub const ResMut = App.ResMut;
         pub const Local = ecs.Local;
         pub const Query = App.Query;
-        pub const QueryS = App.QueryS;
-        pub const QuerySFiltered = App.QuerySFiltered;
-        pub const QueryFiltered = App.QueryFiltered;
+        pub const Filter = ecs.Filter;
+        pub const QueryF = App.QueryF;
         pub const Alloc = App.Alloc;
         pub const Jobs = App.Jobs;
         pub const And = App.And;
         pub const Or = App.Or;
-        pub const Added = ecs.Added;
-        pub const Changed = ecs.Changed;
-        pub const With = ecs.With;
         pub const Chain = ecs.Chain;
-        pub const WithOut = ecs.WithOut;
         pub const Commands = App.Commands;
         pub const CommandFn = App.CommandFn;
         pub const Children = ecs.Children;
@@ -37,8 +31,6 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const Error = ecs.EcsError;
         pub const Access = ecs.Access(cfg.FlagInt);
         pub const World = ecs.WorldAccess(cfg);
-        // pub const ResFlag = ecs.ResFlag;
-        // pub const CompFlag = ecs.CompFlag;
 
         // Event Extension
         const e = ev.EventExtension(cfg);

@@ -55,11 +55,11 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
 
                 fn despawn_scoped(
                     cmd: App.Commands,
-                    query: App.Query(.{StateScoped(StateType)}),
+                    query: App.Query(struct { entity: ecs.Entity, scope: *const StateScoped(StateType) }),
                     state: App.Res(State(StateType)),
                 ) !void {
                     const current_state: StateType = state.inner.current;
-                    var it = query.iterQ(struct { entity: ecs.Entity, scope: *const StateScoped(StateType) });
+                    var it = query.iter();
                     while (it.next()) |en| if (en.scope.state != current_state) try cmd.despawn(en.entity);
                 }
             };

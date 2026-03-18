@@ -32,8 +32,8 @@ test "ecs" {
     try ecs.components.remove(alloc, ent2, Bar);
     try ecs.components.remove(alloc, ent2, Foo);
 
-    const q1 = try app.Query(.{Foo}).fromWorld(ecs);
-    var viewIter = q1.iterQ(struct { entity: Entity, foo: *const Foo });
+    const q1 = try app.Query(struct { entity: Entity, foo: *const Foo }).fromWorld(ecs);
+    var viewIter = q1.iter();
     var count: u32 = 0;
 
     while (viewIter.next()) |en| {
@@ -48,8 +48,8 @@ test "ecs" {
 
     ecs.update();
 
-    const q2 = try app.Query(.{ Baz, Foo }).fromWorld(ecs);
-    var bazIter = q2.iterQ(struct { b: *const Baz, f: *const Foo });
+    const q2 = try app.Query(struct { b: *const Baz, f: *const Foo }).fromWorld(ecs);
+    var bazIter = q2.iter();
     count = 0;
     while (bazIter.next()) |en| {
         try expect(en.b.n == 11);
@@ -73,8 +73,8 @@ test "commands" {
     try expect(ecs.entities.count == 1);
     try expect(entity.id() == 1);
 
-    const q = try App(.{}).Query(.{Foo}).fromWorld(ecs);
-    var view = q.iterQ(struct { entity: Entity, foo: *const Foo });
+    const q = try App(.{}).Query(struct { entity: Entity, foo: *const Foo }).fromWorld(ecs);
+    var view = q.iter();
 
     var count: u32 = 0;
     while (view.next()) |en| {
@@ -111,14 +111,14 @@ test "system" {
     const sys = (struct {
         fn sys_test(
             c: a.Commands,
-            query: a.Query(.{Foo}),
+            query: a.Query(struct { foo: *const Foo }),
             bar: a.ResMut(Bar),
             liz: e.Local(Liz),
         ) EcsError!void {
             _ = try c.spawn(.{Foo{ .i = 21 }});
             try expect(liz.inner.i == 0);
 
-            var it = query.iterQ(struct { foo: *const Foo });
+            var it = query.iter();
             const en = it.next().?;
             try expect(en.foo.i == 69);
             try expect(bar.inner.i == 420);
@@ -128,13 +128,13 @@ test "system" {
     const sys2 = (struct {
         fn sys_test(
             c: a.Commands,
-            query: a.Query(.{ Foo, e.Mut(Too) }),
+            query: a.Query(struct { foo: *const Foo, too: *Too }),
             bar: a.Res(Bar),
             liz: e.Local(Liz),
         ) EcsError!void {
             _ = try c.spawn(.{Foo{ .i = 22 }});
 
-            var it = query.iterQ(struct { foo: *const Foo, too: *Too });
+            var it = query.iter();
 
             const en = it.next().?;
 
@@ -231,8 +231,8 @@ test "children_despawn" {
 
     world.update();
 
-    const q = try app.Query(.{Foo}).fromWorld(world);
-    var it = q.iterQ(struct { foo: *const Foo });
+    const q = try app.Query(struct { foo: *const Foo }).fromWorld(world);
+    var it = q.iter();
     while (it.next()) |en| {
         std.debug.print("THIS SHOULD NOT HAPPEN {any}\n", .{en});
     }
