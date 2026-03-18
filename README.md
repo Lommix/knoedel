@@ -2,24 +2,23 @@
 
 # Knödel-ECS
 
-Single file data oriented application framework written in Zig.
+An entity component system (ECS) written in Zig.
+Heavily inspired by the rust ECS `Bevy`.
 
-Heavily inspired by the rust ECS `Bevy`. (Very similar API)
-
-Works great with any backend. Raylib, Sokol, SDL or your own
+(Very similar API)
 
 **zig version: 0.15.1**
 
 ## Features
 
-- Intuitive plugin API.
-- Lock free auto concurrency.
-- Queries, resources and system locals.
-- Component hooks.
-- Event and state extensions.
-- Archtype based storage.
-- Single file. Easy to copy, modify and own.
-- No hidden control flow, full manual control.
+- Bevy's super awesome plugin and systems API in Zig
+- Lock free auto concurrency
+- Queries, resources and system locals
+- Component hooks and Bevy's 'Required Component' equivalent
+- Event and State extension
+- Archtype based storage
+- Manual control
+- Can run inside a DLL (re-add plugins after reload)!. Enables hot reload!
 
 Example:
 
