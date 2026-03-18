@@ -17,6 +17,7 @@ Heavily inspired by the rust ECS `Bevy`.
 - Component hooks and Bevy's 'Required Component' equivalent
 - Event and State extension
 - Archtype based storage
+- Children Parent relations
 - Manual control
 - Can run inside a DLL (re-add plugins after reload)!. Enables hot reload!
 
