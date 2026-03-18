@@ -23,7 +23,7 @@ pub const AppDesc = struct {
 };
 
 /// The memory dictator
-pub const Memtator = struct {
+pub const EcsAllocator = struct {
     const Self = @This();
     const Stats = struct {
         world_mem: usize,
@@ -40,7 +40,7 @@ pub const Memtator = struct {
     parent: std.mem.Allocator,
 
     /// requires pinned postion on memory.
-    pub fn init(allocator: std.mem.Allocator, frame_mem: usize) !Memtator {
+    pub fn init(allocator: std.mem.Allocator, frame_mem: usize) !EcsAllocator {
         const frame_sector = try allocator.alloc(u8, frame_mem);
         return .{
             .world_mutex = .{},
@@ -206,7 +206,7 @@ pub const Children = struct {
 pub fn App(comptime desc: AppDesc) type {
     return struct {
         // ----------------------------------------
-        memtator: Memtator,
+        memtator: EcsAllocator,
         entities: struct {
             entity_mutex: std.Thread.Mutex = .{},
             unused: std.ArrayList(Entity) = .{},
@@ -224,7 +224,7 @@ pub fn App(comptime desc: AppDesc) type {
         const World = @This();
 
         pub fn init(gpa: std.mem.Allocator) EcsError!*World {
-            const memtator = try Memtator.init(gpa, desc.max_frame_mem);
+            const memtator = try EcsAllocator.init(gpa, desc.max_frame_mem);
             const systems = try SystemRegistry.init(gpa);
             const self = try gpa.create(World);
 
@@ -373,7 +373,7 @@ pub fn App(comptime desc: AppDesc) type {
 
             // ----------------------------------------
             // hook
-            const mask = self.components.mask_lookup.get(ent).?;
+            const mask = self.components.archtypes.items[self.components.entity_lookup.get(ent).?].mask;
             const hook_mask = mask.intersectWith(self.hooks.has_despawn_hook);
             var it = hook_mask.iterator();
             while (it.next()) |flag| {
@@ -1209,7 +1209,7 @@ pub fn App(comptime desc: AppDesc) type {
                             const flag = world.components.component_flags.getFlag(C);
 
                             if (world.hooks.remove_hooks.contains(flag)) {
-                                const comp = world.components.getSingle(ent.*, C).?;
+                                const comp = world.components.getSingle(ent.*, C) orelse return;
                                 try world.hooks.runRemoveHook(flag, comp, ent.*, world);
                             }
 
@@ -2214,6 +2214,15 @@ fn ArchType(FlagInt: type) type {
                 dst.putRaw(info.changed, info.added, dst_index, dst_meta, data);
             }
 
+            if (skipped >= 2) {
+                for (self.columns.items) |*m| {
+                    _ = dst.getMeta(m.flag) orelse {
+                        std.debug.print("{s} ", .{flags.getId(m.flag).name});
+                    };
+                }
+                std.debug.print("\n", .{});
+            }
+
             // generally there should only be one comp missing from the target
             assert(skipped < 2);
 
@@ -2404,10 +2413,6 @@ fn ArchType(FlagInt: type) type {
 fn ComponentRegistry(FlagInt: type) type {
     return struct {
         component_flags: HeapFlagSet(FlagInt) = .{},
-        // --------------------------- TODO: group these
-        // const EntityMeta = struct { arch_id: usize, mask: Co };
-        /// entity -> mask
-        mask_lookup: std.AutoHashMapUnmanaged(Entity, HeapFlagSet(FlagInt).Set) = .{},
         /// entity -> arch id
         entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
         /// group mask -> arch id
@@ -2420,20 +2425,12 @@ fn ComponentRegistry(FlagInt: type) type {
         const Self = @This();
         const CHUNK_SIZE: usize = 64;
 
-        pub fn getOrPutMask(self: *Self, gpa: std.mem.Allocator, entity: Entity) !*HeapFlagSet(FlagInt).Set {
-            const res = try self.mask_lookup.getOrPut(gpa, entity);
-            if (!res.found_existing) {
-                res.value_ptr.* = HeapFlagSet(FlagInt).Set.initEmpty();
-            }
-            return res.value_ptr;
-        }
-
         pub fn add(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, comp: anytype) !void {
             const CompType = @TypeOf(comp);
             const flag = self.component_flags.getFlag(CompType);
 
-            var mask = try self.getOrPutMask(allocator, entity);
-            const current_arch_id = self.archtypes_lookup.get(mask.*);
+            const current_arch_id = self.entity_lookup.get(entity);
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
 
             if (mask.contains(flag)) {
                 const arch = &self.archtypes.items[current_arch_id.?];
@@ -2444,7 +2441,7 @@ fn ComponentRegistry(FlagInt: type) type {
             mask.insert(flag);
 
             // add to new
-            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
+            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask);
             if (!new_arch_id.found_existing) {
                 // create
                 if (current_arch_id) |current_id| {
@@ -2477,12 +2474,11 @@ fn ComponentRegistry(FlagInt: type) type {
         }
 
         pub fn addBundle(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, bundle: anytype) !void {
-            var mask = try self.getOrPutMask(allocator, entity);
-
-            const current_arch_id = self.archtypes_lookup.get(mask.*);
+            const current_arch_id = self.entity_lookup.get(entity);
             const is_new_entity = current_arch_id == null;
 
-            const old_mask = mask.*;
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            const old_mask = mask;
             inline for (bundle) |comp| {
                 const CompType = @TypeOf(comp);
                 if (isTuple(CompType)) continue;
@@ -2493,7 +2489,7 @@ fn ComponentRegistry(FlagInt: type) type {
 
             const same_arch = mask.eql(old_mask);
 
-            const next_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
+            const next_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask);
             if (!next_arch_id.found_existing and !same_arch) {
                 if (is_new_entity) {
                     try self.archtypes.append(allocator, .{});
@@ -2546,16 +2542,23 @@ fn ComponentRegistry(FlagInt: type) type {
         }
 
         pub fn remove(self: *Self, allocator: std.mem.Allocator, entity: Entity, comptime C: type) !void {
-            const flag = self.component_flags.getFlag(C);
-            var mask = try self.getOrPutMask(allocator, entity);
             const current_arch_id = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
 
-            // TODO: failsafe required?
-            if (!mask.contains(flag)) return;
-            // assert(mask.contains(flag));
+            // linear lookup in current arch is faster then the registry
+            const meta = self.archtypes.items[current_arch_id].getMetaByHash(hashType(C)) orelse {
+                return;
+            };
 
-            mask.remove(flag);
-            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask.*);
+            const flag = meta.flag;
+            const mask = self.archtypes.items[current_arch_id].mask;
+
+            // If mask doesn't have this flag, the component was already removed. Return silently.
+            if (!mask.contains(flag)) return;
+
+            var new_mask = mask;
+            new_mask.remove(flag);
+
+            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, new_mask);
 
             if (!new_arch_id.found_existing) {
                 var new_arch = try self.archtypes.items[current_arch_id].cloneEmpty(allocator);
@@ -2567,13 +2570,8 @@ fn ComponentRegistry(FlagInt: type) type {
 
             const new_arch = &self.archtypes.items[new_arch_id.value_ptr.*];
             try self.archtypes.items[current_arch_id].moveTo(allocator, &self.component_flags, entity, new_arch);
-            _ = try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
-        }
 
-        pub fn has(self: *const Self, entity: Entity, comptime C: type) bool {
-            const mask = self.mask_lookup.get(entity) orelse return false;
-            const flag = self.component_flags.getFlag(C);
-            return mask.contains(flag);
+            _ = try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
         }
 
         /// TODO: deinit allocating components
