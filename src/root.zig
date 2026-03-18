@@ -14,6 +14,7 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const ResMut = App.ResMut;
         pub const Local = ecs.Local;
         pub const Query = App.Query;
+        pub const Filter = ecs.Filter;
         pub const QueryF = App.QueryF;
         pub const Alloc = App.Alloc;
         pub const Jobs = App.Jobs;

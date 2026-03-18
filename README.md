@@ -58,7 +58,7 @@ pub fn main() !void{
         app.runPar(Schedule.post_update, true);
         app.runPar(Schedule.pre_render, true);
         app.run(Schedule.render, false);
-        app.runPar(pre.Schedule.cleanup, true);
+        app.runPar(Schedule.cleanup, true);
         app.update(); // reset frame arena, consume remaining commands, progress world ticks.
     }
 }
@@ -70,7 +70,7 @@ All mentioned components are not part of Knödel. Only `Parent` and `Children` a
 
 ```zig
 // game_start.zig file
-comst m = @import("main.zig");
+const m = @import("main.zig");
 const kn = m.kn;
 const Schedule = m.Schedule;
 const Gamestate = m.Gamestate;
@@ -101,10 +101,11 @@ fn spawn_player(
     cmd: kn.Commands,
     // Mutable Resource, just like in Bevy, `Res(type)` for read access only.
     game_state: kn.ResMut(kn.State(Gamestate)),
-    // Queries can have multiple filters. `With(type)`, `WithOut(type)`, `Added(type)` and `Changed(type)` provided by core
-    query: QueryFiltered(.{kn.Mut(Enemy), SomeComp}, .{kn.Added(Idle)}),
-    // you can also directly query an entry
-    short_query: QueryS(struct {t: *Transform, v: *const Visbility}),
+    // Queries can have multiple filters. `With`, `Without`, `Added` and `Changed` provided by core
+    // Use `*T` for mutable access, `*const T` for read-only access
+    query: kn.QueryF(struct { entity: kn.Entity, enemy: *Enemy, some: *const SomeComp }, .Added(Idle)),
+    // you can also query without filters
+    short_query: kn.Query(struct { t: *Transform, v: *const Visibility }),
     // system local resources.
     counter: kn.Local(MyRes),
     // event writer and reader, just like in Bevy
@@ -124,7 +125,7 @@ fn spawn_player(
     counter.inner.value += 1;
 
     // add player as target for all enemies
-    var it = query.iterQ(struct {entity: kn.Entity, enemy: *Enemy, somecomp: *const SomeComp});
+    var it = query.iter();
     while(it.next()) |entry| {
         entry.enemy.target = player_entity;
         std.debug.print("updated entity {d}\n", .{entry.entity.id()});
@@ -184,10 +185,14 @@ pub fn plugin(world: *kn.App) !void {
 }
 
 // Here are all filters available in one query.
-// !IMPORTANT! `Changed` only works when you mark components as changed. In Zig we can't simple have deref traits implement side effects (syntax would be annoying)
-// this can be done on the current iteration
+// !IMPORTANT! `Changed` only works when you mark components as changed. In Zig we can't simply have deref traits implement side effects.
+// This can be done on the current iteration via `it.changed(T)`.
 fn my_system(
-    query: kn.QueryFiltered(.{kn.Mut(Transform), Sprite}, .{Changed(Transform), With(Sprite), Without(Hidden), Added(GlobalTransform)}),
+    query: kn.QueryF(struct {
+        entity: kn.Entity,
+        transform: *Transform,
+        sprite: *const Sprite,
+    }, .And3(.Changed(Transform), .Without(Hidden), .Added(GlobalTransform))),
     time: kn.Res(Time),
     some_mut_res: kn.ResMut(Something),
 )!void{
@@ -196,18 +201,13 @@ fn my_system(
     // mutate a resource
     some_mut_res.inner.something = 42;
 
-    // entity can always accessed
-    // non `const` pointers must be marked with `Mut()` else compiler error
-    var it = query.iterQ(struct {
-        entity: kn.Entity,
-        transform: *Transform,
-        sprite: *const Sprite,
-    });
+    // use `*T` for mutable access, `*const T` for read-only
+    // `With(Sprite)` is implicit since `sprite` is in the query struct
+    var it = query.iter();
 
     while(it.next()) |entry|{
-
         // you need to manually mark a component as changed in the current iteration
-        it.changed(Transform)
+        it.changed(Transform);
     }
     ...
 }
@@ -293,10 +293,10 @@ balance load on your available threads.
 ```zig
 pub fn propagate_global_transform(
     jobs: kn.Jobs,
-    roots: kn.QueryFiltered(.{Transform}, .{kn.WithOut(kn.Parent)}),
-    query: kn.Query(.{ Transform, kn.Mut(GlobalTransform), ?kn.Children }),
+    roots: kn.QueryF(struct { entity: kn.Entity, t: *const Transform }, .Without(kn.Parent)),
+    query: kn.Query(struct { t: *const Transform, gt: *GlobalTransform, children: ?*kn.Children }),
 ) !void{
-    var it = roots.iterEntity();
+    var it = roots.iter();
     var wg = std.Thread.WorkGroup{};
     while(it.next()) |entity| try jobs.go(&wg, propgate_tree, .{entity, query});
     wg.wait();
