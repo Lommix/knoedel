@@ -1354,6 +1354,17 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
             archtypes: []const ArchType(FlagInt),
             tick: u32,
         ) !Self {
+            var state = Self{};
+
+            state.build_access_set(flags);
+            try state.build_match(gpa, archtypes);
+
+            state.last_update = @intCast(archtypes.len);
+            state.created_on = tick;
+            return state;
+        }
+
+        pub fn build_access_set(self: *Self, flags: *FlagSet) void {
             var include = FlagSet.Set.initEmpty();
 
             const QueryInfo = @typeInfo(Q);
@@ -1369,31 +1380,9 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
                 }
             }
 
-            var state = Self{};
-
-            state.access_sets = try F.accessSets(FlagInt, flags, .{
+            self.access_sets = try F.accessSets(FlagInt, flags, .{
                 .with = include,
             });
-
-            var intersect_with: FlagSet.Set = .initEmpty();
-            var intersect_without: FlagSet.Set = .initEmpty();
-
-            for (state.access_sets, 0..) |set, i| {
-                if (i == 0) {
-                    intersect_with = set.with;
-                    intersect_without = set.without;
-                } else {
-                    intersect_with.setIntersection(set.with);
-                    intersect_without.setIntersection(set.without);
-                }
-            }
-
-            try state.build_match(gpa, archtypes);
-
-            state.last_update = @intCast(archtypes.len);
-            state.created_on = tick;
-
-            return state;
         }
 
         pub fn build_match(self: *Self, gpa: std.mem.Allocator, arches: []const ArchType(FlagInt)) !void {
@@ -1740,12 +1729,14 @@ pub fn Chain(comptime T: anytype) type {
 }
 
 pub inline fn hashStr(str: []const u8) u32 {
+    @setEvalBranchQuota(3200);
     var value: u32 = 2166136261;
     inline for (str) |c| value = (value ^ @as(u32, @intCast(c))) *% 16777619;
     return value;
 }
 
 pub inline fn hashType(comptime T: type) u32 {
+    @setEvalBranchQuota(3200);
     var value: u32 = 2166136261;
     for (@typeName(T)) |c| value = (value ^ @as(u32, @intCast(c))) *% 16777619;
     return value;
@@ -3117,6 +3108,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
                     world.world_tick,
                 );
             } else if (state.last_update < world.components.archtypes.items.len) {
+                state.build_access_set(&world.components.component_flags);
                 try state.build_match(world.memtator.world(), world.components.archtypes.items);
                 state.last_update = @intCast(world.components.archtypes.items.len);
             }
