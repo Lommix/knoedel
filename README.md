@@ -103,7 +103,11 @@ fn spawn_player(
     game_state: kn.ResMut(kn.State(Gamestate)),
     // Queries can have multiple filters. `With`, `Without`, `Added` and `Changed` provided by core
     // Use `*T` for mutable access, `*const T` for read-only access
-    query: kn.QueryF(struct { entity: kn.Entity, enemy: *Enemy, some: *const SomeComp }, .Added(Idle)),
+    query: kn.QueryF(struct {
+        entity: kn.Entity,
+        enemy: *Enemy,
+        some: *const SomeComp,
+    }, .Added(Idle)),
     // you can also query without filters
     short_query: kn.Query(struct { t: *Transform, v: *const Visibility }),
     // system local resources.
