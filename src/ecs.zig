@@ -259,17 +259,17 @@ pub fn App(comptime desc: AppDesc) type {
         }
 
         /// run a system schedule in lock free parallel
-        pub fn runPar(self: *World, schedule: anytype, flush_commands_after: bool) void {
+        pub fn runPar(self: *World, schedule: anytype) void {
             self.systems.runPar(schedule, self) catch |err| {
                 std.log.err("system failed with `{any}`", .{err});
             };
-            if (flush_commands_after) self.flushCommands();
         }
 
         /// run a system schedule in 'order' (depending on order added)
-        pub fn run(self: *World, schedule: anytype, flush_commands_after: bool) void {
-            self.systems.run(schedule, self) catch return;
-            if (flush_commands_after) self.flushCommands();
+        pub fn run(self: *World, schedule: anytype) void {
+            self.systems.run(schedule, self) catch |err| {
+                std.log.err("system failed with `{any}`", .{err});
+            };
         }
 
         /// run any system right now, pass any *const fn ptr.

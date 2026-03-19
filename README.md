@@ -54,12 +54,24 @@ pub fn main() !void{
 
     while (true) {
         app.runPar(Schedule.pre_update, true);
+        app.flushCommands();
+
         app.runPar(Schedule.update, true);
+        app.flushCommands();
+
         app.runPar(Schedule.post_update, true);
+        app.flushCommands();
+
         app.runPar(Schedule.pre_render, true);
+        app.flushCommands();
+
         app.run(Schedule.render, false);
+        app.flushCommands();
+
         app.runPar(Schedule.cleanup, true);
-        app.update(); // reset frame arena, consume remaining commands, progress world ticks.
+        app.flushCommands();
+
+        app.update(); // reset frame arena, progress world ticks.
     }
 }
 ```
