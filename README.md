@@ -50,25 +50,26 @@ pub fn main() !void{
     // ...
 
     // run the init schedule once
-    try app.run(Schedule.init, true); // <-- `true`: consume command buffer after schedule
+    try app.run(Schedule.init);
+        app.flushCommands();
 
     while (true) {
-        app.runPar(Schedule.pre_update, true);
+        app.runPar(Schedule.pre_update);
         app.flushCommands();
 
-        app.runPar(Schedule.update, true);
+        app.runPar(Schedule.update);
         app.flushCommands();
 
-        app.runPar(Schedule.post_update, true);
+        app.runPar(Schedule.post_update);
         app.flushCommands();
 
-        app.runPar(Schedule.pre_render, true);
+        app.runPar(Schedule.pre_render);
         app.flushCommands();
 
-        app.run(Schedule.render, false);
+        app.run(Schedule.render);
         app.flushCommands();
 
-        app.runPar(Schedule.cleanup, true);
+        app.runPar(Schedule.cleanup);
         app.flushCommands();
 
         app.update(); // reset frame arena, progress world ticks.
