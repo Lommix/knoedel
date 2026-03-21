@@ -601,7 +601,7 @@ pub fn App(comptime desc: AppDesc) type {
                     .debug = try std.fmt.allocPrint(gpa, "{s}", .{fn_name}),
                     .run = (struct {
                         fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry(desc.FlagInt), last_run_tick: u32) EcsError!void {
-                            @setEvalBranchQuota(3200);
+                            @setEvalBranchQuota(6400);
                             const sys_func: *fnType = @ptrCast(@alignCast(ptr));
                             var sys_args: genArgType(info.@"fn".params) = undefined;
                             inline for (info.@"fn".params, 0..) |*p, i| {
@@ -1976,6 +1976,7 @@ fn ArchType(FlagInt: type) type {
 
         pub fn addComp(self: *Self, gpa: std.mem.Allocator, flags: *HeapFlagSet(FlagInt), flag: CompFlag) !void {
             assert(self.len == 0);
+            if (self.mask.contains(flag)) return;
 
             const id = flags.getId(flag);
 
