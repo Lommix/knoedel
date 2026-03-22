@@ -10,6 +10,7 @@ pub fn Knoedel(cfg: ecs.AppDesc) type {
         pub const App = ecs.App(cfg);
         pub const Entity = ecs.Entity;
         pub const Has = ecs.Has;
+        pub const Meta = ecs.ArchType(cfg.FlagInt).Meta;
         pub const Res = App.Res;
         pub const ResMut = App.ResMut;
         pub const Local = ecs.Local;

@@ -1883,7 +1883,7 @@ fn HeapFlagSet(comptime FlagInt: type) type {
                             switch (@typeInfo(T)) {
                                 .@"struct" => |str| {
                                     inline for (str.fields, 0..) |field, i| {
-                                        try w.print("{s}: {any}", .{ field.name, @field(comp, field.name) });
+                                        try w.print(".{s}: {any},", .{ field.name, @field(comp, field.name) });
                                         if (i < str.fields.len -| 1) try w.print("\n", .{});
                                     }
                                 },
@@ -1944,7 +1944,7 @@ pub fn Access(FlagInt: type) type {
 }
 
 /// ArchType = opaque runtime MultiArrayList
-fn ArchType(FlagInt: type) type {
+pub fn ArchType(FlagInt: type) type {
     return struct {
         const Self = @This();
         const CompFlag = HeapFlagSet(FlagInt).Flag;
@@ -1957,6 +1957,26 @@ fn ArchType(FlagInt: type) type {
         pub const TickInfo = struct {
             added: u32 = 0,
             changed: u32 = 0,
+        };
+        pub const Meta = struct {
+            _columns: []const ColMeta,
+            _mask: *const HeapFlagSet(FlagInt).Set,
+
+            pub fn has(self: @This(), comptime T: type) bool {
+                const target = comptime hashType(T);
+                for (self._columns) |col| {
+                    if (col.hash == target) return true;
+                }
+                return false;
+            }
+
+            pub fn columns(self: @This()) []const ColMeta {
+                return self._columns;
+            }
+
+            pub fn mask(self: @This()) *const HeapFlagSet(FlagInt).Set {
+                return self._mask;
+            }
         };
         /// allocate in chunks of:
         chunk_size: usize = 512,
@@ -2282,6 +2302,14 @@ fn ArchType(FlagInt: type) type {
                 // entity
                 if (field.type == Entity) {
                     @field(row, field.name) = self.getEntity(index);
+                    continue;
+                }
+                // meta
+                if (field.type == Meta) {
+                    @field(row, field.name) = .{
+                        ._columns = self.columns.items,
+                        ._mask = &self.mask,
+                    };
                     continue;
                 }
                 // skip tags
@@ -3091,7 +3119,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             return c;
         }
 
-        pub fn setWorldTick(self: *Self, tick: u32) void {
+        fn setWorldTick(self: *Self, tick: u32) void {
             self.world_tick = tick;
         }
 
