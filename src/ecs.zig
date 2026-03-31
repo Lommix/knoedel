@@ -9,18 +9,8 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const cprint = std.fmt.comptimePrint;
 
-pub const MB: usize = 1024 * 1000;
-pub const GB: usize = MB * 1000;
+pub const AppDesc = @import("root.zig").AppDesc;
 
-/// ECS configuration
-pub const AppDesc = struct {
-    /// how many cores ? (set it to 1 for web)
-    thread_count: comptime_int = 8,
-    /// frame arena max size
-    max_frame_mem: usize = 64 * MB,
-    /// defines max components and resources bit sets u6 = 64 Components max
-    FlagInt: type = u6,
-};
 
 /// The memory dictator
 pub const EcsAllocator = struct {
@@ -126,7 +116,7 @@ pub const EcsAllocator = struct {
         return Stats{
             .world_mem = self.world_arena.queryCapacity(),
             .frame_percent = @floatCast(@as(f64, @floatFromInt(self.frame_alloc.end_index)) / @as(f64, @floatFromInt(self.frame_sector.len))),
-            .frame_used_mb = @divTrunc(self.frame_alloc.end_index, MB),
+            .frame_used_mb = @divTrunc(self.frame_alloc.end_index, @import("root.zig").MB),
         };
     }
 };
@@ -434,6 +424,38 @@ pub fn App(comptime desc: AppDesc) type {
                 const ent = Entity.new(self.entities.count + 1); // avoid using 0 which is our .placeholder
                 self.entities.count += 1;
                 return ent;
+            }
+        }
+
+        /// Claim a specific entity id for use. Despawns any existing entity
+        /// occupying the same slot first.
+        pub fn claimEntityId(self: *World, entity: Entity) EcsError!void {
+            if (self.isValid(entity)) {
+                try self.despawn(entity);
+            }
+
+            self.entities.entity_mutex.lock();
+            defer self.entities.entity_mutex.unlock();
+
+            const idx = entity.id();
+
+            // remove from unused pool
+            var i: usize = 0;
+            while (i < self.entities.unused.items.len) {
+                if (self.entities.unused.items[i].id() == idx) {
+                    _ = self.entities.unused.swapRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+
+            // extend count if needed, filling gaps into unused
+            if (idx > self.entities.count) {
+                var gap: u32 = self.entities.count + 1;
+                while (gap < idx) : (gap += 1) {
+                    try self.entities.unused.append(self.memtator.world(), Entity.new(gap));
+                }
+                self.entities.count = idx;
             }
         }
 
@@ -1047,6 +1069,12 @@ pub fn App(comptime desc: AppDesc) type {
                 return entity;
             }
 
+            /// spawn with a specific pre-claimed entity id
+            pub fn spawnWithEntity(self: *const Self, entity: Entity, bundle: anytype) EcsError!void {
+                const cmd = try insertCommand(self.frame_gpa, entity, bundle);
+                try self.reg.add(self.frame_gpa, cmd);
+            }
+
             /// despawns an entity
             pub fn despawn(self: *const Self, entity: Entity) EcsError!void {
                 const cmd = try despawnCommand(self.frame_gpa, entity);
@@ -1067,6 +1095,12 @@ pub fn App(comptime desc: AppDesc) type {
             /// add a component to entity, overwritting existing
             pub fn insert(self: *const Self, entity: Entity, comp: anytype) EcsError!void {
                 const cmd = try insertCommand(self.frame_gpa, entity, comp);
+                try self.reg.add(self.frame_gpa, cmd);
+            }
+
+            /// Insert raw component bytes into an entity by flag. Used for deserialization.
+            pub fn insertRaw(self: *const Self, entity: Entity, flag: HeapFlagSet(desc.FlagInt).Flag, bytes: []const u8) EcsError!void {
+                const cmd = try insertRawCommand(self.frame_gpa, entity, flag, bytes);
                 try self.reg.add(self.frame_gpa, cmd);
             }
 
@@ -1214,6 +1248,33 @@ pub fn App(comptime desc: AppDesc) type {
                             }
 
                             try world.components.remove(world.memtator.world(), ent.*, C);
+                        }
+                    }
+                }).run,
+            };
+        }
+
+        fn insertRawCommand(allocator: std.mem.Allocator, entity: Entity, flag: HeapFlagSet(desc.FlagInt).Flag, bytes: []const u8) EcsError!Command {
+            const CompFlag = HeapFlagSet(desc.FlagInt).Flag;
+            const Args = struct {
+                ent: Entity,
+                flag: CompFlag,
+                data: []const u8,
+            };
+
+            const args = try allocator.create(Args);
+            // copy bytes to frame allocator so they outlive the caller's buffer
+            const data_copy = try allocator.alloc(u8, bytes.len);
+            @memcpy(data_copy, bytes);
+            args.* = .{ .ent = entity, .flag = flag, .data = data_copy };
+
+            return Command{
+                .ptr = args,
+                .run = (struct {
+                    fn run(ctx: *anyopaque, world: *World) EcsError!void {
+                        const a: *Args = @ptrCast(@alignCast(ctx));
+                        if (world.isValid(a.ent)) {
+                            try world.components.addRaw(world.memtator.world(), world.world_tick, a.ent, a.flag, a.data);
                         }
                     }
                 }).run,
@@ -1832,7 +1893,7 @@ pub fn ResourceRegistry(FlagInt: type) type {
     };
 }
 
-fn HeapFlagSet(comptime FlagInt: type) type {
+pub fn HeapFlagSet(comptime FlagInt: type) type {
     return struct {
         const Self = @This();
         const Max = std.math.maxInt(FlagInt);
@@ -1843,12 +1904,12 @@ fn HeapFlagSet(comptime FlagInt: type) type {
         registered_buf: [Max]Info = undefined,
         registered_len: usize = 0,
 
+
         pub const Info = struct {
             name: []const u8,
             hash: u32,
             size: usize,
             alignment: usize,
-            serialize: ?*const fn (*const anyopaque, *std.Io.Writer) EcsError!void,
             print: ?*const fn (*const anyopaque, *std.Io.Writer) EcsError!void,
         };
 
@@ -1873,7 +1934,6 @@ fn HeapFlagSet(comptime FlagInt: type) type {
                 .hash = hash,
                 .size = @sizeOf(T),
                 .alignment = @alignOf(T),
-                .serialize = null,
                 .print = (struct {
                     fn fmt(ptr: *const anyopaque, w: *std.Io.Writer) EcsError!void {
                         const comp: *const T = @ptrCast(@alignCast(ptr));
@@ -2501,6 +2561,61 @@ fn ComponentRegistry(FlagInt: type) type {
             } else {
                 try self.archtypes.items[new_arch_id.value_ptr.*].put(allocator, &self.component_flags, tick, entity, .{comp});
             }
+
+            try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
+        }
+
+        /// Insert raw component bytes into an entity by flag. Used for deserialization.
+        pub fn addRaw(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, flag: CompFlag, bytes: []const u8) !void {
+            const current_arch_id = self.entity_lookup.get(entity);
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+
+            if (mask.contains(flag)) {
+                // overwrite existing component
+                const arch = &self.archtypes.items[current_arch_id.?];
+                const meta = arch.getMeta(flag).?;
+                const index = arch.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+                arch.putRaw(tick, tick, index, meta, bytes);
+                return;
+            }
+
+            mask.insert(flag);
+
+            const new_arch_id = try self.archtypes_lookup.getOrPut(allocator, mask);
+            if (!new_arch_id.found_existing) {
+                if (current_arch_id) |current_id| {
+                    const cloned = try self.archtypes.items[current_id].cloneEmpty(allocator);
+                    try self.archtypes.append(allocator, cloned);
+                    new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+                } else {
+                    try self.archtypes.append(allocator, .{ .chunk_size = CHUNK_SIZE });
+                    new_arch_id.value_ptr.* = self.archtypes.items.len - 1;
+                }
+
+                try self.archtypes.items[new_arch_id.value_ptr.*].addComp(allocator, &self.component_flags, flag);
+                try self.archtypes.items[new_arch_id.value_ptr.*].setCapacity(allocator, &self.component_flags, CHUNK_SIZE);
+            }
+
+            if (current_arch_id) |current_id| {
+                try self.archtypes.items[current_id].moveTo(
+                    allocator,
+                    &self.component_flags,
+                    entity,
+                    &self.archtypes.items[new_arch_id.value_ptr.*],
+                );
+            } else {
+                const arch = &self.archtypes.items[new_arch_id.value_ptr.*];
+                if (arch.len >= arch.capacity) {
+                    try arch.setCapacity(allocator, &self.component_flags, arch.capacity + arch.chunk_size);
+                }
+                _ = try arch.putEntity(allocator, entity);
+            }
+
+            // write raw bytes
+            const arch = &self.archtypes.items[new_arch_id.value_ptr.*];
+            const meta = arch.getMeta(flag).?;
+            const index = arch.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
+            arch.putRaw(tick, tick, index, meta, bytes);
 
             try self.entity_lookup.put(allocator, entity, new_arch_id.value_ptr.*);
         }

@@ -1,8 +1,21 @@
 pub const ecs = @import("ecs.zig");
 pub const ev = @import("events.zig");
 pub const st = @import("state.zig");
+pub const std = @import("std");
 
-pub const AppDesc = ecs.AppDesc;
+pub const MB: usize = 1024 * 1000;
+pub const GB: usize = MB * 1000;
+
+/// ECS configuration
+pub const AppDesc = struct {
+    /// how many cores ? (set it to 1 for web)
+    thread_count: comptime_int = 8,
+    /// frame arena max size
+    max_frame_mem: usize = 64 * MB,
+    /// defines max components and resources bit sets u6 = 64 Components max
+    FlagInt: type = u6,
+};
+
 /// Knödel ECS
 pub fn Knoedel(cfg: AppDesc) type {
     return struct {
@@ -25,6 +38,9 @@ pub fn Knoedel(cfg: AppDesc) type {
         pub const Chain = ecs.Chain;
         pub const Commands = App.Commands;
         pub const CommandFn = App.CommandFn;
+        pub const CompFlag = ecs.HeapFlagSet(cfg.FlagInt).Flag;
+        pub const CompInfo = ecs.HeapFlagSet(cfg.FlagInt).Info;
+        pub const hashType = ecs.hashType;
         pub const Children = ecs.Children;
         pub const Parent = ecs.Parent;
         pub const ResouceRegistry = ecs.ResourceRegistry(cfg.FlagInt);
