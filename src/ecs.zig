@@ -1958,6 +1958,9 @@ pub fn ArchType(FlagInt: type) type {
             added: u32 = 0,
             changed: u32 = 0,
         };
+
+        /// Entity Meta information
+        /// fast `has` checks on components
         pub const Meta = struct {
             _columns: []const ColMeta,
             _mask: *const HeapFlagSet(FlagInt).Set,

@@ -2,8 +2,9 @@ pub const ecs = @import("ecs.zig");
 pub const ev = @import("events.zig");
 pub const st = @import("state.zig");
 
+pub const AppDesc = ecs.AppDesc;
 /// Knödel ECS
-pub fn Knoedel(cfg: ecs.AppDesc) type {
+pub fn Knoedel(cfg: AppDesc) type {
     return struct {
         pub const MB = ecs.MB;
         pub const GB = ecs.GB;
