@@ -11,7 +11,6 @@ const cprint = std.fmt.comptimePrint;
 
 pub const AppDesc = @import("root.zig").AppDesc;
 
-
 /// The memory dictator
 pub const EcsAllocator = struct {
     const Self = @This();
@@ -609,10 +608,18 @@ pub fn App(comptime desc: AppDesc) type {
 
                     if (@hasDecl(PT, "addAccess")) {
                         PT.addAccess(app, &access);
-                    }
-
-                    if (@hasDecl(PT, "SelfValidate")) {
-                        PT.SelfValidate();
+                    } else {
+                        switch (@typeInfo(PT)) {
+                            .@"struct" => |str| {
+                                inline for (str.fields) |field| {
+                                    if (@typeInfo(field.type) != .@"struct") continue;
+                                    if (@hasDecl(field.type, "addAccess")) {
+                                        field.type.addAccess(app, &access);
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
                     }
                 }
 
@@ -652,6 +659,39 @@ pub fn App(comptime desc: AppDesc) type {
                                     continue;
                                 }
 
+                                switch (@typeInfo(PT)) {
+                                    .@"struct" => |str| {
+                                        var compound: PT = undefined;
+                                        inline for (str.fields) |field| {
+                                            if (@hasDecl(field.type, "fromLocal")) {
+                                                var ret = try field.type.fromLocal(world, locals);
+                                                if (@hasDecl(field.type, "setWorldTick")) ret.setWorldTick(last_run_tick);
+                                                @field(compound, field.name) = ret;
+                                                continue;
+                                            }
+
+                                            if (@hasDecl(field.type, "fromWorld")) {
+                                                var ret = try field.type.fromWorld(world);
+                                                if (@hasDecl(field.type, "setWorldTick")) ret.setWorldTick(last_run_tick);
+                                                @field(compound, field.name) = ret;
+                                                continue;
+                                            }
+
+                                            if (@hasDecl(field.type, "is_local_marker")) {
+                                                const res = try locals.getOrDefault(world.memtator.world(), field.type.innerType);
+                                                @field(compound, field.name) = field.type{ .inner = res };
+                                                continue;
+                                            }
+
+                                            @compileError(cprint("compund system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
+                                        }
+
+                                        @field(sys_args, cprint("{d}", .{i})) = compound;
+                                        continue;
+                                    },
+                                    else => {},
+                                }
+
                                 @compileError(cprint("system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
                             }
 
@@ -666,11 +706,6 @@ pub fn App(comptime desc: AppDesc) type {
                 }
 
                 return hash;
-
-                // try self.systems.append(gpa, op_system);
-                // const id = SystemID{ .slot = self.systems.items.len - 1 };
-                // // try self.system_ptr_lookup.put(@intFromPtr(system), id);
-                // return id;
             }
 
             pub fn add(
@@ -1904,7 +1939,6 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
         registered_buf: [Max]Info = undefined,
         registered_len: usize = 0,
 
-
         pub const Info = struct {
             name: []const u8,
             hash: u32,
@@ -1989,7 +2023,6 @@ pub fn Access(FlagInt: type) type {
             const empty = FlagSet.Set.initEmpty();
             if (!self.comp_read_write.intersectWith(other.comp_write).eql(empty)) return false;
             if (!self.comp_write.intersectWith(other.comp_read_write).eql(empty)) return false;
-            if (!self.comp_write.intersectWith(other.comp_write).eql(empty)) return false;
             return true;
         }
 
@@ -1997,7 +2030,6 @@ pub fn Access(FlagInt: type) type {
             const empty = FlagSet.Set.initEmpty();
             if (!self.res_read_write.intersectWith(other.res_write).eql(empty)) return false;
             if (!self.res_write.intersectWith(other.res_read_write).eql(empty)) return false;
-            if (!self.res_write.intersectWith(other.res_write).eql(empty)) return false;
             return true;
         }
     };
@@ -2018,6 +2050,17 @@ pub fn ArchType(FlagInt: type) type {
             added: u32 = 0,
             changed: u32 = 0,
         };
+
+        /// Count fields in a query struct that need a cached meta pointer
+        pub fn queryMetaCount(comptime Q: type) usize {
+            const info = @typeInfo(Q).@"struct";
+            comptime var count: usize = 0;
+            inline for (info.fields) |field| {
+                if (field.type == Entity or field.type == Meta or @sizeOf(field.type) == 0) continue;
+                count += 1;
+            }
+            return count;
+        }
 
         /// Entity Meta information
         /// fast `has` checks on components
@@ -2207,8 +2250,7 @@ pub fn ArchType(FlagInt: type) type {
         }
 
         pub inline fn getSingleRawConst(self: *Self, index: usize, meta: *const ColMeta) []u8 {
-            const comp_offset = meta.offset + meta.size * index;
-            return self.bytes[comp_offset .. comp_offset + meta.size];
+            return self.getSingleRaw(index, meta);
         }
 
         pub inline fn getSingleRaw(self: *Self, index: usize, meta: *const ColMeta) []u8 {
@@ -2415,6 +2457,92 @@ pub fn ArchType(FlagInt: type) type {
             }
 
             return row;
+        }
+
+        /// Query struct by index using pre-resolved meta pointers (avoids per-entity lookups)
+        pub inline fn getQueryIndexCached(self: *Self, index: usize, comptime Q: type, cached_metas: *const [queryMetaCount(Q)]?*const ColMeta) Q {
+            var row: Q = undefined;
+            const info = @typeInfo(Q).@"struct";
+            comptime var meta_idx: usize = 0;
+
+            inline for (info.fields) |field| {
+                if (field.type == Entity) {
+                    @field(row, field.name) = self.getEntity(index);
+                    continue;
+                }
+                if (field.type == Meta) {
+                    @field(row, field.name) = .{
+                        ._columns = self.columns.items,
+                        ._mask = &self.mask,
+                    };
+                    continue;
+                }
+                if (@sizeOf(field.type) == 0) {
+                    @field(row, field.name) = .{};
+                    continue;
+                }
+                if (@typeInfo(field.type) == .@"struct") {
+                    if (@hasDecl(field.type, "_is_has")) {
+                        @field(row, field.name) = .{ .val = cached_metas[meta_idx] != null };
+                        meta_idx += 1;
+                        continue;
+                    }
+                }
+
+                const field_ptr = switch (@typeInfo(field.type)) {
+                    .pointer => @typeInfo(field.type).pointer,
+                    .optional => |opt| @typeInfo(opt.child).pointer,
+                    else => @compileError("Type not allowed: " ++ field.name),
+                };
+
+                if (cached_metas[meta_idx]) |meta| {
+                    if (field_ptr.is_const) {
+                        @field(row, field.name) = @ptrCast(@alignCast(self.getSingleRawConst(index, meta)));
+                    } else {
+                        @field(row, field.name) = @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
+                    }
+                } else {
+                    if (@typeInfo(field.type) == .optional) {
+                        @field(row, field.name) = null;
+                    } else {
+                        unreachable;
+                    }
+                }
+                meta_idx += 1;
+            }
+
+            return row;
+        }
+
+        /// Resolve meta pointers for a query type against this archetype
+        pub inline fn resolveQueryMetas(self: *Self, flags: *HeapFlagSet(FlagInt), comptime Q: type) [queryMetaCount(Q)]?*const ColMeta {
+            const info = @typeInfo(Q).@"struct";
+            var metas: [queryMetaCount(Q)]?*const ColMeta = undefined;
+            comptime var meta_idx: usize = 0;
+
+            inline for (info.fields) |field| {
+                if (field.type == Entity or field.type == Meta or @sizeOf(field.type) == 0) continue;
+
+                if (@typeInfo(field.type) == .@"struct") {
+                    if (@hasDecl(field.type, "_is_has")) {
+                        const flag = flags.getFlag(field.type.inner);
+                        metas[meta_idx] = if (self.mask.contains(flag)) self.getMeta(flag) else null;
+                        meta_idx += 1;
+                        continue;
+                    }
+                }
+
+                const field_ptr = switch (@typeInfo(field.type)) {
+                    .pointer => @typeInfo(field.type).pointer,
+                    .optional => |opt| @typeInfo(opt.child).pointer,
+                    else => @compileError("Type not allowed: " ++ field.name),
+                };
+                const hash = comptime hashType(field_ptr.child);
+                metas[meta_idx] = self.getMetaByHash(hash);
+                meta_idx += 1;
+            }
+
+            return metas;
         }
 
         /// calc table offsets per comp
@@ -2829,17 +2957,30 @@ fn EntityIter(FlagInt: type) type {
 pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *const Filter) type {
     const ArchOnly = filter.IsArchOnly();
     const branch_ticks = comptime filter.comptimeBranchTicks();
+    const Arch = ArchType(FlagInt);
+    const meta_count = Arch.queryMetaCount(Q);
+
+    // Total tick meta count across all branches (for caching tick filter lookups)
+    const tick_meta_count = comptime blk: {
+        var count: usize = 0;
+        for (branch_ticks) |branch| {
+            count += branch.added.len + branch.changed.len;
+        }
+        break :blk count;
+    };
 
     return struct {
         const Self = @This();
         const empty = HeapFlagSet(FlagInt).Set.initEmpty();
-        const ArchResult = if (ArchOnly) *ArchType(FlagInt) else ArchScope(FlagInt);
+        const ArchResult = if (ArchOnly) *Arch else ArchScope(FlagInt);
 
         flags: *HeapFlagSet(FlagInt),
         arch_iter: ArchSopeIter(FlagInt, ArchOnly),
         current_arch: ?ArchResult = null,
         offset: usize = 0,
         world_tick: u32,
+        cached_metas: [meta_count]?*const Arch.ColMeta = undefined,
+        cached_tick_metas: [tick_meta_count]?*const Arch.ColMeta = undefined,
 
         pub fn next(self: *Self) ?Q {
             while (true) {
@@ -2852,36 +2993,67 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *con
                     }
 
                     if (!ArchOnly) {
-                        if (!passesTickFilter(entry.arch, entry.set_id, self.world_tick, self.offset)) {
+                        if (!passesTickFilterCached(entry.arch, entry.set_id, self.world_tick, self.offset, &self.cached_tick_metas)) {
                             self.offset += 1;
                             continue;
                         }
                     }
 
-                    const next_item = arch.getQueryIndex(self.flags, self.offset, Q) catch {
-                        self.offset += 1;
-                        continue;
-                    };
-
+                    const next_item = arch.getQueryIndexCached(self.offset, Q, &self.cached_metas);
                     self.offset += 1;
                     return next_item;
                 }
 
-                self.current_arch = self.arch_iter.next() orelse return null;
+                const entry = self.arch_iter.next() orelse return null;
+                self.current_arch = entry;
                 self.offset = 0;
+
+                // Resolve meta pointers once per archetype
+                const arch = if (ArchOnly) entry else entry.arch;
+                self.cached_metas = arch.resolveQueryMetas(self.flags, Q);
+
+                if (!ArchOnly) {
+                    self.resolveTickMetas(arch);
+                }
             }
         }
 
-        inline fn passesTickFilter(arch: *ArchType(FlagInt), set_id: u32, tick: u32, index: usize) bool {
+        fn resolveTickMetas(self: *Self, arch: *Arch) void {
+            comptime var idx: usize = 0;
+            inline for (branch_ticks) |branch| {
+                inline for (branch.added) |hash| {
+                    self.cached_tick_metas[idx] = arch.getMetaByHash(hash);
+                    idx += 1;
+                }
+                inline for (branch.changed) |hash| {
+                    self.cached_tick_metas[idx] = arch.getMetaByHash(hash);
+                    idx += 1;
+                }
+            }
+        }
+
+        // Comptime offsets into cached_tick_metas for each branch
+        const branch_offsets = blk: {
+            var offsets: [branch_ticks.len]usize = undefined;
+            var off: usize = 0;
+            for (branch_ticks, 0..) |branch, i| {
+                offsets[i] = off;
+                off += branch.added.len + branch.changed.len;
+            }
+            break :blk offsets;
+        };
+
+        inline fn passesTickFilterCached(arch: *Arch, set_id: u32, tick: u32, index: usize, tick_metas: *const [tick_meta_count]?*const Arch.ColMeta) bool {
             inline for (branch_ticks, 0..) |branch, i| {
                 if (set_id == i) {
-                    inline for (branch.added) |hash| {
-                        const meta = arch.getMetaByHash(hash) orelse return true;
+                    const base = branch_offsets[i];
+                    inline for (0..branch.added.len) |j| {
+                        const meta = tick_metas[base + j] orelse return true;
                         const info = arch.getTickInfo(index, meta);
                         if (info.added < tick) return false;
                     }
-                    inline for (branch.changed) |hash| {
-                        const meta = arch.getMetaByHash(hash) orelse return true;
+                    inline for (0..branch.changed.len) |j| {
+                        const meta = tick_metas[base + branch.added.len + j] orelse return true;
                         const info = arch.getTickInfo(index, meta);
                         if (info.changed < tick -| 1) return false;
                     }
