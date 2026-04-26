@@ -11,7 +11,7 @@ Heavily inspired by the rust ECS `Bevy`.
 
 ## Features
 
-- Bevy's super awesome plugin and systems API in Zig
+- Bevy's awesome plugin and systems API in Zig
 - Lock free auto concurrency
 - Queries, resources and system locals
 - Component hooks and Bevy's 'Required Component' equivalent
@@ -19,7 +19,7 @@ Heavily inspired by the rust ECS `Bevy`.
 - Archtype based storage
 - Children Parent relations
 - Manual control
-- Can run inside a DLL (re-add plugins after reload)!. Enables hot reload!
+- Can run inside a dylib (re-add plugins after reload). Enables hot reloading!
 
 Example:
 
