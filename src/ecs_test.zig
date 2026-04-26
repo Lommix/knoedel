@@ -7,6 +7,10 @@ const ArchType = e.ArchType;
 const App = e.App;
 const EcsError = e.EcsError;
 
+fn testIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 // -------------------------------------
 // tests
 test "ecs" {
@@ -15,7 +19,7 @@ test "ecs" {
     const Baz = struct { n: i32 };
 
     const app = App(.{});
-    var ecs = try app.init(std.testing.allocator);
+    var ecs = try app.init(std.testing.allocator, testIo());
     defer ecs.deinit();
 
     const alloc = ecs.memtator.world();
@@ -63,7 +67,7 @@ test "commands" {
     const Foo = struct { n: i32 };
 
     const app = App(.{});
-    var ecs = try app.init(std.testing.allocator);
+    var ecs = try app.init(std.testing.allocator, testIo());
     defer ecs.deinit();
 
     const cmd = ecs.getCommands();
@@ -92,7 +96,7 @@ test "system" {
     const Liz = struct { i: u32 = 0 };
 
     const a = App(.{});
-    var world = try a.init(std.testing.allocator);
+    var world = try a.init(std.testing.allocator, testIo());
     defer world.deinit();
 
     // -------------
@@ -170,7 +174,7 @@ test "system" {
 
 test "local" {
     const app = App(.{});
-    var world = try app.init(std.testing.allocator);
+    var world = try app.init(std.testing.allocator, testIo());
     defer world.deinit();
 }
 
@@ -184,7 +188,7 @@ test "test_resource" {
     const res = TestRes{ .a = 69 };
 
     const app = App(.{});
-    var world = try app.init(std.testing.allocator);
+    var world = try app.init(std.testing.allocator, testIo());
     defer world.deinit();
 
     try world.addResource(res);
@@ -200,13 +204,13 @@ test "children_despawn" {
     const Biz = struct { c: u32 = 2 };
 
     const app = App(.{});
-    var world = try app.init(std.testing.allocator);
+    var world = try app.init(std.testing.allocator, testIo());
     defer world.deinit();
     const gpa = world.memtator.world();
 
     const cmd = world.getCommands();
 
-    var list = std.ArrayList(Entity){};
+    var list: std.ArrayList(Entity) = .empty;
     defer list.deinit(gpa);
 
     for (0..500) |_| {

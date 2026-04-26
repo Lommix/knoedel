@@ -22,8 +22,6 @@ pub const EcsAllocator = struct {
     // ---------------------------------------
     frame_sector: []u8, // frame arena
     world_arena: std.heap.ArenaAllocator,
-    world_mutex: std.Thread.Mutex = .{},
-    world_mem_size: usize = 0,
     frame_alloc: std.heap.FixedBufferAllocator,
     frame_max_alloc_perc: f32 = 0,
     parent: std.mem.Allocator,
@@ -32,8 +30,6 @@ pub const EcsAllocator = struct {
     pub fn init(allocator: std.mem.Allocator, frame_mem: usize) !EcsAllocator {
         const frame_sector = try allocator.alloc(u8, frame_mem);
         return .{
-            .world_mutex = .{},
-            .world_mem_size = 0,
             .frame_sector = frame_sector,
             .world_arena = std.heap.ArenaAllocator.init(allocator),
             .frame_alloc = std.heap.FixedBufferAllocator.init(frame_sector),
@@ -68,32 +64,21 @@ pub const EcsAllocator = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        self.world_mutex.lock();
-        defer self.world_mutex.unlock();
-        self.world_mem_size +|= len;
         return self.world_arena.allocator().rawAlloc(len, alignment, ra);
     }
 
     fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        self.world_mutex.lock();
-        defer self.world_mutex.unlock();
-        self.world_mem_size += new_len - buf.len;
         return self.world_arena.allocator().rawResize(buf, alignment, new_len, ret_addr);
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        self.world_mutex.lock();
-        defer self.world_mutex.unlock();
         return self.world_arena.allocator().rawRemap(memory, alignment, new_len, ret_addr);
     }
 
     fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        self.world_mutex.lock();
-        defer self.world_mutex.unlock();
-        self.world_mem_size -|= buf.len;
         return self.world_arena.allocator().rawFree(buf, alignment, ret_addr);
     }
 
@@ -177,7 +162,7 @@ pub const Parent = struct {
 };
 
 pub const Children = struct {
-    items: std.ArrayList(Entity) = .{},
+    items: std.ArrayList(Entity) = .empty,
 
     pub fn slice(self: *const Children) []const Entity {
         return self.items.items;
@@ -197,8 +182,8 @@ pub fn App(comptime desc: AppDesc) type {
         // ----------------------------------------
         memtator: EcsAllocator,
         entities: struct {
-            entity_mutex: std.Thread.Mutex = .{},
-            unused: std.ArrayList(Entity) = .{},
+            entity_mutex: std.Io.Mutex = .init,
+            unused: std.ArrayList(Entity) = .empty,
             count: u32 = 0,
         } = .{},
 
@@ -209,10 +194,11 @@ pub fn App(comptime desc: AppDesc) type {
         commands: CommandRegistry = .{},
         hooks: HookRegistry(desc) = .{},
         world_tick: u32 = 0,
+        io: std.Io,
         // ---------------------------------------
         const World = @This();
 
-        pub fn init(gpa: std.mem.Allocator) EcsError!*World {
+        pub fn init(gpa: std.mem.Allocator, io: std.Io) EcsError!*World {
             const memtator = try EcsAllocator.init(gpa, desc.max_frame_mem);
             const systems = try SystemRegistry.init(gpa);
             const self = try gpa.create(World);
@@ -220,8 +206,8 @@ pub fn App(comptime desc: AppDesc) type {
             self.* = .{
                 .memtator = memtator,
                 .systems = systems,
+                .io = io,
             };
-            try self.systems.startExecutor();
 
             return self;
         }
@@ -412,8 +398,8 @@ pub fn App(comptime desc: AppDesc) type {
 
         /// threadsafe next entity id
         pub fn nextEntityId(self: *World) Entity {
-            self.entities.entity_mutex.lock();
-            defer self.entities.entity_mutex.unlock();
+            self.entities.entity_mutex.lockUncancelable(self.io);
+            defer self.entities.entity_mutex.unlock(self.io);
 
             if (self.entities.unused.items.len > 0) {
                 var ent = self.entities.unused.pop().?;
@@ -433,8 +419,8 @@ pub fn App(comptime desc: AppDesc) type {
                 try self.despawn(entity);
             }
 
-            self.entities.entity_mutex.lock();
-            defer self.entities.entity_mutex.unlock();
+            self.entities.entity_mutex.lockUncancelable(self.io);
+            defer self.entities.entity_mutex.unlock(self.io);
 
             const idx = entity.id();
 
@@ -458,16 +444,12 @@ pub fn App(comptime desc: AppDesc) type {
             }
         }
 
-        ///TODO: move
-        const BatchExecutor = Executor(.{ .max_threads = desc.thread_count });
-
         /// main system scheduler
         pub const SystemRegistry = struct {
             // --------------------------
-            executor: BatchExecutor = undefined,
-            systems: std.AutoHashMapUnmanaged(SystemID, OpaqueSystem) = .{},
-            locals: std.AutoHashMapUnmanaged(SystemID, LocalRegistry(desc.FlagInt)) = .{},
-            schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .{},
+            systems: std.AutoHashMapUnmanaged(SystemID, OpaqueSystem) = .empty,
+            locals: std.AutoHashMapUnmanaged(SystemID, LocalRegistry(desc.FlagInt)) = .empty,
+            schedule_order: std.AutoHashMapUnmanaged(ScheduleID, Schedule) = .empty,
             // --------------------------
 
             const Self = @This();
@@ -493,19 +475,13 @@ pub fn App(comptime desc: AppDesc) type {
                 systems: std.ArrayList(struct {
                     id: SystemID,
                     deps: ?std.ArrayList(SystemID) = null,
-                }) = .{},
+                }) = .empty,
                 batch_count: usize = 0,
                 run_time_ns: i128 = 0,
             };
 
-            pub fn init(gpa: std.mem.Allocator) !Self {
-                return .{
-                    .executor = BatchExecutor.init(gpa),
-                };
-            }
-
-            pub fn startExecutor(self: *Self) !void {
-                try self.executor.start();
+            pub fn init(_: std.mem.Allocator) !Self {
+                return .{};
             }
 
             /// free all registered systems, leaky, debug only idc
@@ -558,7 +534,7 @@ pub fn App(comptime desc: AppDesc) type {
                 };
                 avg_ns: i128 = 0,
                 batch_count: usize = 0,
-                batches: std.ArrayList(InfoEntry) = .{},
+                batches: std.ArrayList(InfoEntry) = .empty,
             };
 
             pub fn scheduleInfo(self: *const Self, gpa: std.mem.Allocator, schedule: anytype) !ScheduleStats {
@@ -733,7 +709,7 @@ pub fn App(comptime desc: AppDesc) type {
                     .type => {
                         // chain
                         if (@hasDecl(system, "_is_chain")) {
-                            var deps = std.ArrayList(SystemID){};
+                            var deps: std.ArrayList(SystemID) = .empty;
                             inline for (system.inner) |field| {
                                 const field_ty = @TypeOf(field);
                                 switch (@typeInfo(field_ty)) {
@@ -772,24 +748,9 @@ pub fn App(comptime desc: AppDesc) type {
             }
 
             fn genArgType(comptime fnargs: []const std.builtin.Type.Fn.Param) type {
-                var fields: [fnargs.len]std.builtin.Type.StructField = undefined;
-                for (fnargs, 0..) |*p, i| {
-                    fields[i] = std.builtin.Type.StructField{
-                        .type = p.type.?,
-                        .alignment = @alignOf(p.type.?),
-                        .is_comptime = false,
-                        .default_value_ptr = null,
-                        .name = std.fmt.comptimePrint("{d}", .{i}),
-                    };
-                }
-                return @Type(.{
-                    .@"struct" = .{
-                        .layout = .auto,
-                        .fields = &fields,
-                        .decls = &[_]std.builtin.Type.Declaration{},
-                        .is_tuple = true,
-                    },
-                });
+                var types: [fnargs.len]type = undefined;
+                for (fnargs, 0..) |*p, i| types[i] = p.type.?;
+                return @Tuple(&types);
             }
 
             pub fn run(self: *Self, schedule: anytype, world: *World) !void {
@@ -802,7 +763,7 @@ pub fn App(comptime desc: AppDesc) type {
                 var dep_graph = std.AutoHashMap(SystemID, std.ArrayList(SystemID)).init(gpa);
                 var dep_counter = std.AutoHashMap(SystemID, usize).init(gpa);
 
-                const start = std.time.nanoTimestamp();
+                const start = std.Io.Clock.Timestamp.now(world.io, .awake);
 
                 for (set.systems.items) |entry| {
                     const sys = self.systems.getPtr(entry.id).?;
@@ -820,14 +781,14 @@ pub fn App(comptime desc: AppDesc) type {
                         try dep_counter.put(entry.id, deps.items.len);
                         for (deps.items) |dep_id| {
                             const res = try dep_graph.getOrPut(dep_id);
-                            if (!res.found_existing) res.value_ptr.* = .{};
+                            if (!res.found_existing) res.value_ptr.* = .empty;
                             try res.value_ptr.append(gpa, entry.id);
                         }
                     }
                 }
 
                 while (scheduled_systems.items.len > 0) {
-                    var remove_list = std.ArrayList(usize){};
+                    var remove_list: std.ArrayList(usize) = .empty;
                     for (scheduled_systems.items, 0..) |id, index| {
                         if (dep_counter.get(id)) |count| if (count > 0) continue;
 
@@ -850,14 +811,14 @@ pub fn App(comptime desc: AppDesc) type {
                     }
                 }
 
-                const total = std.time.nanoTimestamp() - start;
+                const total: i128 = start.untilNow(world.io).raw.toNanoseconds();
                 set.run_time_ns = @divTrunc(set.run_time_ns + total, 2);
                 set.batch_count = 0;
             }
 
             pub fn runPar(self: *Self, schedule: anytype, world: *World) !void {
                 const set = self.schedule_order.getPtr(@intFromEnum(schedule)) orelse return;
-                const start = std.time.nanoTimestamp();
+                const start = std.Io.Clock.Timestamp.now(world.io, .awake);
                 const gpa = world.memtator.frame();
                 // Optimized queue entry with dependency tracking
                 const QueueEntry = struct {
@@ -893,7 +854,7 @@ pub fn App(comptime desc: AppDesc) type {
                         try dep_counter.put(entry.id, deps.items.len);
                         for (deps.items) |dep_id| {
                             const res = try dep_graph.getOrPut(dep_id);
-                            if (!res.found_existing) res.value_ptr.* = .{};
+                            if (!res.found_existing) res.value_ptr.* = .empty;
                             try res.value_ptr.append(gpa, entry.id);
                         }
                     }
@@ -901,11 +862,11 @@ pub fn App(comptime desc: AppDesc) type {
 
                 // prep batches
                 while (scheduled_systems.items.len > 0) {
-                    var batch = std.ArrayList(SystemID){};
+                    var batch: std.ArrayList(SystemID) = .empty;
                     var access = Access(desc.FlagInt){};
 
-                    var remove_list = std.ArrayList(usize){};
-                    var update_deps = std.ArrayList(SystemID){};
+                    var remove_list: std.ArrayList(usize) = .empty;
+                    var update_deps: std.ArrayList(SystemID) = .empty;
 
                     for (scheduled_systems.items, 0..) |en, index| {
                         if (dep_counter.get(en.id)) |count| if (count > 0) continue;
@@ -937,28 +898,28 @@ pub fn App(comptime desc: AppDesc) type {
                 }
 
                 for (batches.items, 0..) |batch, i| {
-                    var wg = std.Thread.WaitGroup{};
+                    var group: std.Io.Group = .init;
                     for (batch.items) |id| {
                         const sys = self.systems.getPtr(id).?;
                         const locals = self.locals.getPtr(id).?;
-                        try self.executor.run(&wg, executeSystem, .{ sys, locals, world, i });
+                        std.Io.Group.async(&group, world.io, executeSystem, .{ sys, locals, world, i });
                     }
-                    wg.wait();
+                    try group.await(world.io);
                 }
 
-                const total = std.time.nanoTimestamp() - start;
+                const total: i128 = start.untilNow(world.io).raw.toNanoseconds();
                 set.run_time_ns = @divTrunc(set.run_time_ns + total, 2);
                 set.batch_count = batches.items.len;
             }
 
             fn executeSystem(sys: *OpaqueSystem, locals: *LocalRegistry(desc.FlagInt), world: *World, batch_id: usize) void {
-                const start = std.time.nanoTimestamp();
+                const start = std.Io.Clock.Timestamp.now(world.io, .awake);
 
                 sys.run(sys.ptr, world, locals, sys.last_run_tick) catch |err| {
                     std.log.scoped(.knoedel).warn("system failed with: `{any}` @`{s}`", .{ err, sys.debug });
                 };
 
-                const total = std.time.nanoTimestamp() - start;
+                const total: i128 = start.untilNow(world.io).raw.toNanoseconds();
                 sys.run_time_ns = total; // @divTrunc(sys.run_time_ns + total, 2);
                 sys.batch_id = batch_id;
                 sys.last_run_tick = world.world_tick;
@@ -1043,16 +1004,14 @@ pub fn App(comptime desc: AppDesc) type {
         // --------------------------------------
         pub const Jobs = struct {
             const Self = @This();
-            executor: *BatchExecutor,
+            io: std.Io,
 
             pub fn fromWorld(world: *World) EcsError!Self {
-                return Jobs{
-                    .executor = &world.systems.executor,
-                };
+                return Jobs{ .io = world.io };
             }
 
-            pub fn go(self: *const Self, group: *std.Thread.WaitGroup, comptime func: anytype, args: anytype) EcsError!void {
-                try self.executor.run(group, func, args);
+            pub fn go(self: *const Self, group: *std.Io.Group, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) EcsError!void {
+                std.Io.Group.async(group, self.io, func, args);
             }
         };
 
@@ -1062,11 +1021,13 @@ pub fn App(comptime desc: AppDesc) type {
         pub const Alloc = struct {
             frame: std.mem.Allocator,
             world: std.mem.Allocator,
+            io: std.Io,
 
             pub fn fromWorld(world: *World) EcsError!Alloc {
                 return .{
                     .frame = world.memtator.frame(),
                     .world = world.memtator.world(),
+                    .io = world.io,
                 };
             }
         };
@@ -1100,59 +1061,59 @@ pub fn App(comptime desc: AppDesc) type {
             pub fn spawn(self: *const Self, bundle: anytype) EcsError!Entity {
                 const entity = self.world.nextEntityId();
                 const cmd = try insertCommand(self.frame_gpa, entity, bundle);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
                 return entity;
             }
 
             /// spawn with a specific pre-claimed entity id
             pub fn spawnWithEntity(self: *const Self, entity: Entity, bundle: anytype) EcsError!void {
                 const cmd = try insertCommand(self.frame_gpa, entity, bundle);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             /// despawns an entity
             pub fn despawn(self: *const Self, entity: Entity) EcsError!void {
                 const cmd = try despawnCommand(self.frame_gpa, entity);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             /// remove a component from entity
             pub fn remove(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
                 const cmd = try removeCommand(self.frame_gpa, entity, C);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             /// add a subcommand
             pub fn add(self: *const Self, cmd: Command) EcsError!void {
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             /// add a component to entity, overwritting existing
             pub fn insert(self: *const Self, entity: Entity, comp: anytype) EcsError!void {
                 const cmd = try insertCommand(self.frame_gpa, entity, comp);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             /// Insert raw component bytes into an entity by flag. Used for deserialization.
             pub fn insertRaw(self: *const Self, entity: Entity, flag: HeapFlagSet(desc.FlagInt).Flag, bytes: []const u8) EcsError!void {
                 const cmd = try insertRawCommand(self.frame_gpa, entity, flag, bytes);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             /// add a resource, overwritting existing (calls `deinit` with alloc on res)
             pub fn insertResource(self: *const Self, comp: anytype) EcsError!void {
                 const cmd = try insertResourceCommand(self.frame_gpa, comp);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             pub fn removeResource(self: *const Self, comp: anytype) EcsError!void {
                 const cmd = try removeResourceCommand(self.frame_gpa, comp);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             pub fn addChild(self: *const Self, parent: Entity, child: Entity) EcsError!void {
                 const cmd = try addChildCommand(self.frame_gpa, parent, child);
-                try self.reg.add(self.frame_gpa, cmd);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
             pub fn fromWorld(world: *World) EcsError!Self {
@@ -1168,12 +1129,12 @@ pub fn App(comptime desc: AppDesc) type {
         pub const CommandRegistry = struct {
             const Self = @This();
 
-            mutex: std.Thread.Mutex = .{},
-            queue: std.ArrayList(Command) = .{},
+            mutex: std.Io.Mutex = .init,
+            queue: std.ArrayList(Command) = .empty,
 
-            pub fn add(self: *Self, allocator: std.mem.Allocator, cmd: Command) EcsError!void {
-                self.mutex.lock();
-                defer self.mutex.unlock();
+            pub fn add(self: *Self, io: std.Io, allocator: std.mem.Allocator, cmd: Command) EcsError!void {
+                try self.mutex.lock(io);
+                defer self.mutex.unlock(io);
 
                 try self.queue.append(allocator, cmd);
             }
@@ -1188,7 +1149,7 @@ pub fn App(comptime desc: AppDesc) type {
 
                     i += 1;
                 }
-                self.queue = .{};
+                self.queue = .empty;
             }
         };
 
@@ -1441,7 +1402,7 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         // ---------------
         created_on: u64 = 0,
         access_sets: [F.BranchCount()]AccessSet(FlagInt) = undefined,
-        matched_archtypes: std.ArrayList(ArchEntry) = .{},
+        matched_archtypes: std.ArrayList(ArchEntry) = .empty,
         last_update: u32 = 0,
 
         pub fn new(
@@ -1880,7 +1841,7 @@ pub fn ResourceRegistry(FlagInt: type) type {
         const TypeID = u32;
         const Self = @This();
 
-        data: std.AutoHashMapUnmanaged(TypeID, Resource) = .{},
+        data: std.AutoHashMapUnmanaged(TypeID, Resource) = .empty,
         resource_flags: HeapFlagSet(FlagInt) = .{},
 
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
@@ -2092,11 +2053,11 @@ pub fn ArchType(FlagInt: type) type {
         /// |ENTITY,ENTITY.. |XX|C1,C1..Tick,Tick..|X|C2,C2..Tick,Tick..
         bytes: []u8 = undefined,
         alignment: usize = 0,
-        columns: std.ArrayList(ColMeta) = .{},
+        columns: std.ArrayList(ColMeta) = .empty,
         /// entity -> index
-        entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
+        entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .empty,
         /// comp hash -> comps index
-        column_lookup: std.AutoHashMapUnmanaged(CompFlag, usize) = .{},
+        column_lookup: std.AutoHashMapUnmanaged(CompFlag, usize) = .empty,
         len: usize = 0,
         capacity: usize = 0,
 
@@ -2634,10 +2595,10 @@ fn ComponentRegistry(FlagInt: type) type {
     return struct {
         component_flags: HeapFlagSet(FlagInt) = .{},
         /// entity -> arch id
-        entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .{},
+        entity_lookup: std.AutoHashMapUnmanaged(Entity, usize) = .empty,
         /// group mask -> arch id
-        archtypes_lookup: std.AutoHashMapUnmanaged(HeapFlagSet(FlagInt).Set, usize) = .{},
-        archtypes: std.ArrayList(ArchType(FlagInt)) = .{},
+        archtypes_lookup: std.AutoHashMapUnmanaged(HeapFlagSet(FlagInt).Set, usize) = .empty,
+        archtypes: std.ArrayList(ArchType(FlagInt)) = .empty,
 
         const FlagSet = HeapFlagSet(FlagInt);
         const CompFlag = FlagSet.Flag;
@@ -3457,157 +3418,15 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
     };
 }
 
-pub const Config = struct {
-    max_threads: u8 = 16,
-};
-
-/// tiny and simple thread pool, that does not leak memory.
-/// TODO: add threading stats avg per frame
-pub fn Executor(comptime cfg: Config) type {
-    return struct {
-        const Self = @This();
-        const Atomic = std.atomic.Value;
-        const Thread = std.Thread;
-        const RunQueue = std.SinglyLinkedList;
-        const Runnable = struct { runFn: RunProto, node: std.SinglyLinkedList.Node = .{} };
-        const RunProto = *const fn (*Runnable) void;
-
-        // ------------------------------------------------------------
-        // TODO: threading stats!
-        //const ExThread = struct{
-        //  thread: Thread,
-        //  avg_load: f32, // time spent executing on avg
-        //}
-
-        threads: [cfg.max_threads]Thread = [_]Thread{undefined} ** cfg.max_threads,
-        running: Atomic(bool) = .{ .raw = false },
-        queue: RunQueue = .{},
-        gpa: std.mem.Allocator,
-        mutex: std.Thread.Mutex = .{},
-        queued: Atomic(usize) = .{ .raw = 0 },
-        active_threads: Atomic(usize) = .{ .raw = 0 },
-        cond: std.Thread.Condition = .{},
-
-        // ------------------------------------------------------------
-
-        pub fn init(gpa: std.mem.Allocator) Self {
-            return .{ .gpa = gpa };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.join();
-        }
-
-        pub fn start(self: *Self) !void {
-            self.running.store(true, .monotonic);
-            if (builtin.single_threaded or cfg.max_threads == 1) return;
-
-            for (self.threads[0..cfg.max_threads]) |*slot| {
-                if (Thread.spawn(.{}, worker, .{self})) |thread| {
-                    slot.* = thread;
-                    _ = self.active_threads.fetchAdd(1, .monotonic);
-                } else |_| {}
-            }
-        }
-
-        pub fn shutdown(self: *Self) void {
-            self.running.store(false, .acq_rel);
-        }
-
-        pub fn isRunning(self: *Self) bool {
-            return self.running.load(.monotonic);
-        }
-
-        fn join(self: *Self) void {
-            for (self.threads) |thread| thread.join();
-        }
-
-        fn worker(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            while (self.isRunning()) {
-                while (self.queue.popFirst()) |run_node| {
-                    self.mutex.unlock();
-                    defer self.mutex.lock();
-
-                    const runable: *Runnable = @fieldParentPtr("node", run_node);
-                    runable.runFn(runable);
-                }
-
-                self.cond.wait(&self.mutex);
-            }
-            _ = self.active_threads.fetchSub(1, .acq_rel);
-        }
-
-        /// add job to current batch
-        pub fn run(
-            self: *Self,
-            group: *Thread.WaitGroup,
-            comptime func: anytype,
-            args: anytype,
-        ) !void {
-            group.start();
-            const Args = @TypeOf(args);
-            const Closure = struct {
-                args: Args,
-                executor: *Self,
-                runnable: Runnable = .{ .runFn = runFn },
-                work_group: *Thread.WaitGroup,
-
-                fn runFn(runnable: *Runnable) void {
-                    const closure: *@This() = @alignCast(@fieldParentPtr("runnable", runnable));
-                    @call(.auto, func, closure.args);
-
-                    // cleanup
-                    const mutex = &closure.executor.mutex;
-                    const work_group = closure.work_group;
-
-                    mutex.lock();
-                    closure.executor.gpa.destroy(closure);
-                    mutex.unlock();
-                    work_group.finish();
-                }
-            };
-
-            if (builtin.single_threaded or cfg.max_threads == 1) {
-                @call(.auto, func, args);
-                group.finish();
-                return;
-            }
-
-            {
-                self.mutex.lock();
-                const closure = self.gpa.create(Closure) catch {
-                    self.mutex.unlock();
-                    @call(.auto, func, args);
-                    group.finish();
-                    return;
-                };
-                closure.* = .{
-                    .args = args,
-                    .executor = self,
-                    .work_group = group,
-                };
-                self.queue.prepend(&closure.runnable.node);
-                self.mutex.unlock();
-            }
-
-            // Wake up a waiting worker
-            self.cond.signal();
-        }
-    };
-}
-
 pub fn HookRegistry(desc: AppDesc) type {
     return struct {
         has_add_hook: FlagSet.Set = .{},
         has_remove_hook: FlagSet.Set = .{},
         has_despawn_hook: FlagSet.Set = .{},
         // --------------------
-        add_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .{},
-        remove_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .{},
-        despawn_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .{},
+        add_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .empty,
+        remove_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .empty,
+        despawn_hooks: std.AutoHashMapUnmanaged(FlagSet.Flag, std.ArrayList(Hook)) = .empty,
 
         const Self = @This();
         const World = App(desc);
@@ -3648,7 +3467,7 @@ pub fn HookRegistry(desc: AppDesc) type {
             self.has_remove_hook.insert(flag);
 
             const res = try self.remove_hooks.getOrPut(gpa, flag);
-            if (!res.found_existing) res.value_ptr.* = .{};
+            if (!res.found_existing) res.value_ptr.* = .empty;
             try res.value_ptr.append(gpa, hook);
         }
 
@@ -3670,7 +3489,7 @@ pub fn HookRegistry(desc: AppDesc) type {
             self.has_despawn_hook.insert(flag);
 
             const res = try self.despawn_hooks.getOrPut(gpa, flag);
-            if (!res.found_existing) res.value_ptr.* = .{};
+            if (!res.found_existing) res.value_ptr.* = .empty;
             try res.value_ptr.append(gpa, hook);
         }
 
@@ -3692,7 +3511,7 @@ pub fn HookRegistry(desc: AppDesc) type {
             self.has_add_hook.insert(flag);
 
             const res = try self.add_hooks.getOrPut(gpa, flag);
-            if (!res.found_existing) res.value_ptr.* = .{};
+            if (!res.found_existing) res.value_ptr.* = .empty;
             try res.value_ptr.append(gpa, hook);
         }
     };

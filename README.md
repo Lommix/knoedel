@@ -7,7 +7,7 @@ Heavily inspired by the rust ECS `Bevy`.
 
 (Very similar API)
 
-**zig version: 0.15.1**
+**zig version: 0.16.0**
 
 ## Features
 
@@ -41,8 +41,9 @@ const Schedule = enum{
     cleanup,
 };
 
-pub fn main() !void{
-    var app = try kn.App.init(std.c_allocator);
+pub fn main(init: std.process.Init) !void{
+
+    var app = try kn.App.init(init.gpa, init.io);
     defer app.deinit();
 
     // add your plugins
@@ -109,7 +110,7 @@ try app.addResource(MyRes{});
 // to harden any arg for lock free concurrency, look at the `addAccess` func on `ResMut` for example.
 fn spawn_player(
     // access the frame or world arena
-    alloc: kn.Alloc,
+    alloc: kn.Alloc, // access to frame/world arena and Io
     // any mutation of the world goes through commands.
     cmd: kn.Commands,
     // Mutable Resource, just like in Bevy, `Res(type)` for read access only.

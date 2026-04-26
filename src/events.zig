@@ -3,10 +3,10 @@ const ecs = @import("ecs.zig");
 
 pub fn EventStore(comptime T: type) type {
     return struct {
-        current: std.ArrayListUnmanaged(T) = .{},
-        next_frame: std.ArrayListUnmanaged(T) = .{},
+        current: std.ArrayList(T) = .empty,
+        next_frame: std.ArrayList(T) = .empty,
 
-        list: std.ArrayList(T) = .{},
+        list: std.ArrayList(T) = .empty,
         offset: usize = 0,
     };
 }
@@ -23,7 +23,7 @@ pub fn EventExtension(comptime cfg: ecs.AppDesc) type {
 
                 pub fn cleanup(store: App.ResMut(EventStore(T))) !void {
                     store.inner.current.clearRetainingCapacity();
-                    std.mem.swap(std.ArrayListUnmanaged(T), &store.inner.current, &store.inner.next_frame);
+                    std.mem.swap(std.ArrayList(T), &store.inner.current, &store.inner.next_frame);
                 }
             };
         }
@@ -47,7 +47,7 @@ pub fn EventExtension(comptime cfg: ecs.AppDesc) type {
         pub fn EventWriter(comptime T: type) type {
             return struct {
                 const Self = @This();
-                queue: *std.ArrayListUnmanaged(T),
+                queue: *std.ArrayList(T),
                 gpa: std.mem.Allocator,
 
                 pub fn fromWorld(world: *App) !Self {
