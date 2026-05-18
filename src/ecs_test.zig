@@ -178,6 +178,44 @@ test "local" {
     defer world.deinit();
 }
 
+test "scheduler ignores skipped active dependencies" {
+    const Counter = struct { calls: u32 = 0 };
+    const Ran = struct { count: u32 = 0 };
+
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator, testIo());
+    defer world.deinit();
+
+    try world.addResource(Counter{});
+    try world.addResource(Ran{});
+
+    const Schedule = enum { update };
+
+    const condition = (struct {
+        fn run(w: *app, _: *e.ResourceRegistry(u6)) EcsError!bool {
+            const counter = try w.resource(Counter);
+            counter.calls += 1;
+            return counter.calls == 2;
+        }
+    }).run;
+
+    const first = (struct {
+        fn run() EcsError!void {}
+    }).run;
+
+    const second = (struct {
+        fn run(ran: app.ResMut(Ran)) EcsError!void {
+            ran.inner.count += 1;
+        }
+    }).run;
+
+    try world.addSystemEx(Schedule.update, e.Chain(.{ &first, &second }), &condition);
+    try world.systems.run(Schedule.update, world);
+
+    try expect((try world.resource(Counter)).calls == 2);
+    try expect((try world.resource(Ran)).count == 1);
+}
+
 test "test_resource" {
     const TestRes = struct {
         a: u32 = 0,
@@ -242,4 +280,51 @@ test "children_despawn" {
     }
 
     try expect(world.entityCount() == 0);
+}
+
+test "claimEntityId despawns existing slot generation" {
+    const Foo = struct { n: i32 };
+
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator, testIo());
+    defer world.deinit();
+
+    const cmd = world.getCommands();
+    const original = try cmd.spawn(.{Foo{ .n = 1 }});
+    world.update();
+
+    var claimed = original;
+    claimed.incGen();
+    try world.claimEntityId(claimed);
+    try cmd.spawnWithEntity(claimed, .{Foo{ .n = 2 }});
+    world.update();
+
+    const q = try app.Query(struct { entity: Entity, foo: *const Foo }).fromWorld(world);
+    var it = q.iter();
+    const row = it.next().?;
+    try expect(row.entity == claimed);
+    try expect(row.foo.n == 2);
+    try expect(it.next() == null);
+    try expect(world.entityCount() == 1);
+}
+
+test "temporary queries allocate match state from frame arena" {
+    const Foo = struct { n: i32 };
+
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator, testIo());
+    defer world.deinit();
+
+    const cmd = world.getCommands();
+    _ = try cmd.spawn(.{Foo{ .n = 1 }});
+    world.update();
+
+    const before = world.memtator.stats().world_mem;
+    for (0..64) |_| {
+        const q = try app.Query(struct { foo: *const Foo }).fromWorld(world);
+        try expect(q.count() == 1);
+    }
+    const after = world.memtator.stats().world_mem;
+
+    try expect(after == before);
 }

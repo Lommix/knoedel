@@ -415,8 +415,8 @@ pub fn App(comptime desc: AppDesc) type {
         /// Claim a specific entity id for use. Despawns any existing entity
         /// occupying the same slot first.
         pub fn claimEntityId(self: *World, entity: Entity) EcsError!void {
-            if (self.isValid(entity)) {
-                try self.despawn(entity);
+            if (self.liveEntityWithId(entity.id())) |live_entity| {
+                try self.despawn(live_entity);
             }
 
             self.entities.entity_mutex.lockUncancelable(self.io);
@@ -442,6 +442,14 @@ pub fn App(comptime desc: AppDesc) type {
                 }
                 self.entities.count = idx;
             }
+        }
+
+        fn liveEntityWithId(self: *World, idx: u32) ?Entity {
+            var it = self.components.entity_lookup.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.id() == idx) return entry.key_ptr.*;
+            }
+            return null;
         }
 
         /// main system scheduler
@@ -494,14 +502,8 @@ pub fn App(comptime desc: AppDesc) type {
                 comptime {
                     if (@typeInfo(@TypeOf(schedule)) != .@"enum") @compileError("schedule needs to be of type enum");
                 }
-                var sum = @as(i128, 0);
-                if (self.systems.get(@intFromEnum(schedule))) |set| {
-                    for (set.items) |sys| {
-                        sum += sys.last_run_time_ns;
-                    }
-                }
-
-                return sum;
+                const set = self.schedule_order.getPtr(@intFromEnum(schedule)) orelse return 0;
+                return set.run_time_ns;
             }
 
             /// Extracting the original function path from the return type.
@@ -760,6 +762,7 @@ pub fn App(comptime desc: AppDesc) type {
 
                 const gpa = world.memtator.frame();
                 var scheduled_systems = try std.ArrayList(SystemID).initCapacity(gpa, 32);
+                var active_systems = std.AutoHashMap(SystemID, void).init(gpa);
                 var dep_graph = std.AutoHashMap(SystemID, std.ArrayList(SystemID)).init(gpa);
                 var dep_counter = std.AutoHashMap(SystemID, usize).init(gpa);
 
@@ -777,13 +780,21 @@ pub fn App(comptime desc: AppDesc) type {
                         if (!should_run) continue;
                     }
                     try scheduled_systems.append(gpa, entry.id);
+                    try active_systems.put(entry.id, {});
+                }
+
+                for (set.systems.items) |entry| {
+                    if (!active_systems.contains(entry.id)) continue;
                     if (entry.deps) |deps| {
-                        try dep_counter.put(entry.id, deps.items.len);
+                        var active_dep_count: usize = 0;
                         for (deps.items) |dep_id| {
+                            if (!active_systems.contains(dep_id)) continue;
+                            active_dep_count += 1;
                             const res = try dep_graph.getOrPut(dep_id);
                             if (!res.found_existing) res.value_ptr.* = .empty;
                             try res.value_ptr.append(gpa, entry.id);
                         }
+                        if (active_dep_count > 0) try dep_counter.put(entry.id, active_dep_count);
                     }
                 }
 
@@ -805,6 +816,8 @@ pub fn App(comptime desc: AppDesc) type {
                             }
                         }
                     }
+
+                    if (remove_list.items.len == 0) return EcsError.SystemFailure;
 
                     for (remove_list.items, 0..) |index, c| {
                         _ = scheduled_systems.orderedRemove(index - c);
@@ -829,6 +842,7 @@ pub fn App(comptime desc: AppDesc) type {
                 // Multi-container architecture for efficient scheduling
                 var scheduled_systems = try std.ArrayList(QueueEntry).initCapacity(gpa, 32);
                 var batches = try std.ArrayList(std.ArrayList(SystemID)).initCapacity(gpa, 32);
+                var active_systems = std.AutoHashMap(SystemID, void).init(gpa);
                 var dep_graph = std.AutoHashMap(SystemID, std.ArrayList(SystemID)).init(gpa);
                 var dep_counter = std.AutoHashMap(SystemID, usize).init(gpa);
 
@@ -849,14 +863,21 @@ pub fn App(comptime desc: AppDesc) type {
                         .id = entry.id,
                         .access = sys.access,
                     });
+                    try active_systems.put(entry.id, {});
+                }
 
+                for (set.systems.items) |entry| {
+                    if (!active_systems.contains(entry.id)) continue;
                     if (entry.deps) |deps| {
-                        try dep_counter.put(entry.id, deps.items.len);
+                        var active_dep_count: usize = 0;
                         for (deps.items) |dep_id| {
+                            if (!active_systems.contains(dep_id)) continue;
+                            active_dep_count += 1;
                             const res = try dep_graph.getOrPut(dep_id);
                             if (!res.found_existing) res.value_ptr.* = .empty;
                             try res.value_ptr.append(gpa, entry.id);
                         }
+                        if (active_dep_count > 0) try dep_counter.put(entry.id, active_dep_count);
                     }
                 }
 
@@ -879,6 +900,8 @@ pub fn App(comptime desc: AppDesc) type {
                         try remove_list.append(gpa, index);
                         try update_deps.append(gpa, en.id);
                     }
+
+                    if (batch.items.len == 0) return EcsError.SystemFailure;
 
                     for (update_deps.items) |id| {
                         if (dep_graph.getPtr(id)) |deps| {
@@ -1892,10 +1915,11 @@ pub fn ResourceRegistry(FlagInt: type) type {
 pub fn HeapFlagSet(comptime FlagInt: type) type {
     return struct {
         const Self = @This();
-        const Max = std.math.maxInt(FlagInt);
+        const Max: usize = @as(usize, std.math.maxInt(FlagInt)) + 1;
         pub const Flag = enum(FlagInt) { _ };
         pub const Set = std.enums.EnumSet(Flag);
 
+        registration_mutex: std.atomic.Mutex = .unlocked,
         registered_hash: [Max]u32 = @splat(0),
         registered_buf: [Max]Info = undefined,
         registered_len: usize = 0,
@@ -1909,19 +1933,29 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
         };
 
         pub inline fn getFlagFromHash(self: *const Self, hash: u32) ?Flag {
-            for (self.registered_hash, 0..) |h, i| if (h == hash) return @enumFromInt(i);
+            const len = @atomicLoad(usize, &self.registered_len, .acquire);
+            for (self.registered_hash[0..len], 0..) |h, i| if (h == hash) return @enumFromInt(i);
             return null;
         }
 
-        pub inline fn getFlag(self: *Self, comptime T: type) Flag {
+        pub fn getFlag(self: *Self, comptime T: type) Flag {
             const hash = hashType(T);
 
-            //TODO: ensure SIMD for linear search
-            for (self.registered_hash, 0..) |h, i| {
+            const len = @atomicLoad(usize, &self.registered_len, .acquire);
+            for (self.registered_hash[0..len], 0..) |h, i| {
                 if (h == hash) return @enumFromInt(i);
             }
 
-            const index = @atomicRmw(@TypeOf(self.registered_len), &self.registered_len, .Add, 1, .release);
+            while (!self.registration_mutex.tryLock()) std.atomic.spinLoopHint();
+            defer self.registration_mutex.unlock();
+
+            const locked_len = @atomicLoad(usize, &self.registered_len, .acquire);
+            for (self.registered_hash[0..locked_len], 0..) |h, i| {
+                if (h == hash) return @enumFromInt(i);
+            }
+
+            const index = locked_len;
+            assert(index < Max);
 
             self.registered_hash[index] = hash;
             self.registered_buf[index] = .{
@@ -1949,6 +1983,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
                 }).fmt,
             };
 
+            @atomicStore(usize, &self.registered_len, index + 1, .release);
             return @enumFromInt(index);
         }
 
@@ -2858,62 +2893,6 @@ fn ArchSopeIter(FlagInt: type, comptime arch_only: bool) type {
     };
 }
 
-fn ArchIter(FlagInt: type) type {
-    return struct {
-        const Self = @This();
-        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
-        reg: []ArchType(FlagInt),
-        include: HeapFlagSet(FlagInt).Set,
-        exclude: HeapFlagSet(FlagInt).Set,
-        index: usize = 0,
-
-        pub fn next(self: *Self) ?*ArchType(FlagInt) {
-            while (self.index < self.reg.len) {
-                const mask = self.reg[self.index].mask;
-                const next_arch = &self.reg[self.index];
-                self.index += 1;
-
-                if (self.include.intersectWith(mask).eql(self.include) and self.exclude.intersectWith(mask).eql(empty) and next_arch.len > 0) {
-                    return next_arch;
-                }
-            }
-            return null;
-        }
-
-        pub fn reset(self: *@This()) void {
-            self.index = 0;
-        }
-    };
-}
-
-fn EntityIter(FlagInt: type) type {
-    return struct {
-        const Self = @This();
-        arch_iter: ArchIter(FlagInt),
-        current: ?*ArchType(FlagInt) = null,
-        offset: usize = 0,
-
-        pub fn next(self: *Self) ?Entity {
-            while (true) {
-                if (self.current) |current_arch| {
-                    if (self.offset >= current_arch.len) {
-                        self.current = null;
-                        self.offset = 0;
-                        continue;
-                    }
-
-                    const next_item = current_arch.getEntity(self.offset);
-                    self.offset += 1;
-                    return next_item;
-                }
-
-                self.current = self.arch_iter.next() orelse return null;
-                self.offset = 0;
-            }
-        }
-    };
-}
-
 //---------------------------------------
 pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *const Filter) type {
     const ArchOnly = filter.IsArchOnly();
@@ -3042,254 +3021,25 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *con
     };
 }
 
-//---------------------------------------
-pub fn Qiter(comptime FlagInt: type, comptime Q: type, comptime filter: anytype) type {
-    return struct {
-        const Self = @This();
-        flags: *HeapFlagSet(FlagInt),
-        arch_iter: ArchIter(FlagInt),
-        current: ?*ArchType(FlagInt) = null,
-        offset: usize = 0,
-        world_tick: u32,
-
-        pub fn next(self: *Self) ?Q {
-            while (true) {
-                if (self.current) |current_arch| {
-                    if (self.offset >= current_arch.len) {
-                        self.current = null;
-                        self.offset = 0;
-                        continue;
-                    }
-
-                    const next_item = current_arch.getFilteredIndex(self.flags, self.world_tick, self.offset, Q, filter) catch {
-                        self.offset += 1;
-                        continue;
-                    };
-
-                    self.offset += 1;
-                    return next_item;
-                }
-
-                self.current = self.arch_iter.next() orelse return null;
-                self.offset = 0;
+fn addFilterAccess(
+    comptime FlagInt: type,
+    comptime filter: *const Filter,
+    flags: *HeapFlagSet(FlagInt),
+    access: *Access(FlagInt),
+) void {
+    switch (filter.*) {
+        .with, .without, .added, .changed => |hash| {
+            if (flags.getFlagFromHash(hash)) |flag| {
+                access.comp_read_write.insert(flag);
             }
-        }
-
-        pub fn reset(self: *Self) void {
-            self.arch_iter.reset();
-            self.current = null;
-            self.offset = 0;
-        }
-
-        /// mark a component of the current iteration as changed.
-        /// should only be called inside a iteration loop.
-        pub fn changed(self: *Self, comptime C: type) void {
-            assert(self.offset > 0);
-            assert(self.current != null);
-            const index = self.offset - 1; // current iteration
-            self.current.?.upateChanged(self.flags, self.world_tick, index, C);
-        }
-    };
-}
-
-//---------------------------------------
-pub fn Citer(comptime C: type, comptime mut: bool, filter: anytype) type {
-    return struct {
-        const Self = @This();
-        const Query = struct { c: if (mut) *C else *const C };
-        arch_iter: ArchIter,
-        current: ?*ArchType = null,
-        offset: usize = 0,
-        world_tick: u32,
-
-        pub fn next(self: *Self) if (mut) ?*C else ?*const C {
-            while (true) {
-                if (self.current) |current_arch| {
-                    if (self.offset >= current_arch.len) {
-                        self.current = null;
-                        self.offset = 0;
-                        continue;
-                    }
-
-                    const next_item = current_arch.getFilteredIndex(self.world_tick, self.offset, Query, filter) catch {
-                        self.offset += 1;
-                        continue;
-                    };
-
-                    self.offset += 1;
-                    return next_item.c;
-                }
-
-                self.current = self.arch_iter.next() orelse return null;
-                self.offset = 0;
+        },
+        .@"and", .@"or" => |children| {
+            inline for (children) |child| {
+                addFilterAccess(FlagInt, &child, flags, access);
             }
-        }
-
-        pub fn reset(self: *Self) void {
-            self.arch_iter.reset();
-            self.current = null;
-            self.offset = 0;
-        }
-
-        /// mark a component of the current iteration as changed.
-        /// should only be called inside a iteration loop.
-        pub fn changed(self: *Self, comptime T: type) void {
-            assert(self.offset > 0);
-            assert(self.current != null);
-            const index = self.offset - 1; // current iteration
-            self.current.?.upateChanged(self.world_tick, index, T);
-        }
-    };
-}
-
-fn QueryMask(FlagType: type) type {
-    return struct {
-        read_set: HeapFlagSet(FlagType).Set = .{},
-        write_set: HeapFlagSet(FlagType).Set = .{},
-        include_set: HeapFlagSet(FlagType).Set = .{},
-        exclude_set: HeapFlagSet(FlagType).Set = .{},
-        filter: ?Filter = null,
-    };
-}
-
-fn extractQuerySets(comptime desc: AppDesc, world: *App(desc), comptime query: anytype, comptime filter: anytype) QueryMask(desc.FlagInt) {
-    // if (!@inComptime()) @compileError("comptime only!");
-    var set: QueryMask(desc.FlagInt) = .{};
-    inline for (query) |comp| {
-        const info = @typeInfo(comp);
-        switch (info) {
-            .optional => |opt| {
-                if (@hasDecl(opt.child, "_is_mut")) {
-                    const comp_id = world.components.component_flags.getFlag(opt.child.inner);
-                    set.write_set.insert(comp_id);
-                    set.read_set.insert(comp_id);
-                } else {
-                    const comp_id = world.components.component_flags.getFlag(opt.child);
-                    set.read_set.insert(comp_id);
-                }
-            },
-            .@"struct" => |str| {
-                if (str.is_tuple) @compileLog("query tuple not allowed");
-                if (@hasDecl(comp, "_is_mut")) {
-                    const comp_id = world.components.component_flags.getFlag(comp.inner);
-                    set.read_set.insert(comp_id);
-                    set.write_set.insert(comp_id);
-                    set.include_set.insert(comp_id);
-                    continue;
-                } else {
-                    const comp_id = world.components.component_flags.getFlag(comp);
-                    set.include_set.insert(comp_id);
-                    set.read_set.insert(comp_id);
-                }
-            },
-            .@"enum" => {
-                const comp_id = world.components.component_flags.getFlag(comp);
-                set.include_set.insert(comp_id);
-                set.read_set.insert(comp_id);
-            },
-
-            .@"union" => {
-                const comp_id = world.components.component_flags.getFlag(comp);
-                set.include_set.insert(comp_id);
-                set.read_set.insert(comp_id);
-            },
-            else => @compileError("not allowed"),
-        }
+        },
+        .empty => {},
     }
-
-    inline for (filter) |comp| {
-        if (@hasDecl(comp, "_is_with") or @hasDecl(comp, "_is_changed") or @hasDecl(comp, "_is_added")) {
-            const flag = world.components.component_flags.getFlag(comp.inner);
-            set.include_set.insert(flag);
-            set.read_set.insert(flag);
-        }
-        if (@hasDecl(comp, "_is_without")) {
-            const flag = world.components.component_flags.getFlag(comp.inner);
-            set.exclude_set.insert(flag);
-        }
-    }
-
-    return set;
-}
-
-// TODO: !THIS SHOULD BE CACHED!
-fn extractQuerySetsFromEntry(comptime desc: AppDesc, world: *App(desc), comptime entry: type, comptime filter: anytype) QueryMask(desc.FlagInt) {
-    var set: QueryMask(desc.FlagInt) = .{};
-    const Info = @typeInfo(entry);
-
-    inline for (Info.@"struct".fields) |field| {
-        const FieldInfo = @typeInfo(field.type);
-        switch (FieldInfo) {
-            .optional => |opt| {
-                const ChildInfo = @typeInfo(opt.child);
-                switch (ChildInfo) {
-                    .pointer => |ptr| {
-                        const comp_id = world.components.component_flags.getFlag(ptr.child);
-                        set.read_set.insert(comp_id);
-                        if (!ptr.is_const) set.write_set.insert(comp_id);
-                    },
-                    else => @compileError("not allowed in query entry " ++ @typeName(opt.child)),
-                }
-            },
-            .pointer => |ptr| {
-                const comp_id = world.components.component_flags.getFlag(ptr.child);
-                set.read_set.insert(comp_id);
-                set.include_set.insert(comp_id);
-                if (!ptr.is_const) set.write_set.insert(comp_id);
-            },
-            .@"struct" => {}, // skip for now
-            .@"enum" => {}, // entity
-            else => @compileError("not allowed in query entry " ++ @typeName(field.type)),
-        }
-    }
-
-    inline for (filter) |comp| {
-        if (@hasDecl(comp, "_is_with") or @hasDecl(comp, "_is_changed") or @hasDecl(comp, "_is_added")) {
-            const flag = world.components.component_flags.getFlag(comp.inner);
-            set.include_set.insert(flag);
-            set.read_set.insert(flag);
-        }
-        if (@hasDecl(comp, "_is_without")) {
-            const flag = world.components.component_flags.getFlag(comp.inner);
-            set.exclude_set.insert(flag);
-        }
-    }
-
-    return set;
-}
-
-fn IsRead(comptime T: type, comptime query: anytype) bool {
-    var found = false;
-    inline for (query) |comp| {
-        switch (@typeInfo(comp)) {
-            .optional => |opt| {
-                if (T == opt.child) found = true;
-            },
-            else => {
-                if (T == comp) found = true;
-            },
-        }
-    }
-    return found;
-}
-
-fn IsWrite(comptime T: type, comptime query: anytype) bool {
-    var found = false;
-    inline for (query) |comp| {
-        switch (@typeInfo(comp)) {
-            .optional => |opt| {
-                if (@hasDecl(opt.child, "_is_mut")) {
-                    if (T == opt.child.inner) found = true;
-                }
-            },
-            else => {
-                if (@hasDecl(comp, "_is_mut")) {
-                    if (T == comp.inner) found = true;
-                }
-            },
-        }
-    }
-    return found;
 }
 
 pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: type, comptime filter: Filter) type {
@@ -3324,6 +3074,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
                     else => {},
                 }
             }
+            addFilterAccess(desc.FlagInt, &filter, flags, access);
         }
 
         pub fn iter(self: *const Self) QueryIter(desc.FlagInt, QueryStruct, &filter) {
@@ -3400,10 +3151,11 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
 
         pub fn fromWorld(world: *App(desc)) EcsError!Self {
             const QS = QueryState(desc.FlagInt, QueryStruct, filter);
-            const state: *QS = try world.memtator.frame().create(QS);
+            const frame_gpa = world.memtator.frame();
+            const state: *QS = try frame_gpa.create(QS);
 
             state.* = try QS.new(
-                world.memtator.world(),
+                frame_gpa,
                 &world.components.component_flags,
                 world.components.archtypes.items,
                 world.world_tick,
