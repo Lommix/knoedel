@@ -338,6 +338,279 @@ pub fn App(comptime desc: AppDesc) type {
             self.world_tick = self.world_tick +% 1;
         }
 
+        pub const ComponentHeader = struct {
+            hash: u32,
+            name: []const u8,
+            size: usize,
+        };
+
+        pub const ResourceHeader = struct {
+            hash: u32,
+            name: []const u8,
+            size: usize,
+        };
+
+        pub const SceneWriteEvent = union(enum) {
+            begin_scene,
+            end_scene,
+            begin_entity: Entity,
+            end_entity: Entity,
+            begin_component: ComponentHeader,
+            end_component: ComponentHeader,
+            begin_resource: ResourceHeader,
+            end_resource: ResourceHeader,
+        };
+
+        pub const SceneReadEvent = union(enum) {
+            begin_scene,
+            end_scene,
+            begin_entity: Entity,
+            end_entity,
+            begin_component: ComponentHeader,
+            end_component,
+            begin_resource: ResourceHeader,
+            end_resource,
+        };
+
+        pub const SceneCodec = struct {
+            ptr: *anyopaque,
+            /// Owns all scene-level framing, names, delimiters, counts, and bytecode.
+            writeEvent: WriteEventFn,
+            readEvent: ReadEventFn,
+            /// Skips only the current component payload. ECS still consumes `end_component`.
+            skipComponentPayload: SkipEventFn,
+            /// Skips only the current resource payload. ECS still consumes `end_resource`.
+            skipResourcePayload: SkipResourceFn,
+
+            pub const WriteEventFn = *const fn (*anyopaque, SceneWriteEvent, *std.Io.Writer) anyerror!void;
+            pub const ReadEventFn = *const fn (*anyopaque, *std.Io.Reader) anyerror!SceneReadEvent;
+            pub const SkipEventFn = *const fn (*anyopaque, ComponentHeader, *std.Io.Reader) anyerror!void;
+            pub const SkipResourceFn = *const fn (*anyopaque, ResourceHeader, *std.Io.Reader) anyerror!void;
+        };
+
+        pub fn registerComponentCodec(
+            self: *World,
+            comptime C: type,
+            name: []const u8,
+            comptime serializeFn: *const fn (*const C, *std.Io.Writer) anyerror!void,
+            comptime deserializeFn: *const fn (*C, std.mem.Allocator, *std.Io.Reader) anyerror!void,
+        ) !void {
+            try self.components.registerCodec(self.memtator.world(), C, .{
+                .name = name,
+                .serialize = (struct {
+                    fn run(ptr: *const anyopaque, w: *std.Io.Writer) anyerror!void {
+                        const comp: *const C = @ptrCast(@alignCast(ptr));
+                        try serializeFn(comp, w);
+                    }
+                }).run,
+                .deserialize = (struct {
+                    fn run(ptr: *anyopaque, allocator: std.mem.Allocator, r: *std.Io.Reader) anyerror!void {
+                        const comp: *C = @ptrCast(@alignCast(ptr));
+                        try deserializeFn(comp, allocator, r);
+                    }
+                }).run,
+            });
+        }
+
+        pub fn registerResourceCodec(
+            self: *World,
+            comptime R: type,
+            name: []const u8,
+            comptime serializeFn: *const fn (*const R, *std.Io.Writer) anyerror!void,
+            comptime deserializeFn: *const fn (*R, std.mem.Allocator, *std.Io.Reader) anyerror!void,
+        ) !void {
+            try self.resources.registerCodec(self.memtator.world(), R, .{
+                .name = name,
+                .serialize = (struct {
+                    fn run(ptr: *const anyopaque, w: *std.Io.Writer) anyerror!void {
+                        const res: *const R = @ptrCast(@alignCast(ptr));
+                        try serializeFn(res, w);
+                    }
+                }).run,
+                .deserializeRegister = (struct {
+                    fn run(reg: *ResourceRegistry(desc.FlagInt), gpa: std.mem.Allocator, r: *std.Io.Reader) anyerror!void {
+                        var res: R = undefined;
+                        try deserializeFn(&res, gpa, r);
+                        try reg.register(gpa, res);
+                    }
+                }).run,
+            });
+        }
+
+        pub fn importScene(self: *World, r: *std.Io.Reader, scene: SceneCodec) !void {
+            switch (try scene.readEvent(scene.ptr, r)) {
+                .begin_scene => {},
+                else => return error.MalformedScene,
+            }
+
+            var reading_resources = false;
+            while (true) {
+                switch (try scene.readEvent(scene.ptr, r)) {
+                    .end_scene => return,
+                    .begin_entity => |entity| {
+                        if (reading_resources) return error.MalformedScene;
+                        try self.importEntityAfterBegin(entity, r, scene);
+                    },
+                    .begin_resource => |header| {
+                        reading_resources = true;
+                        try self.importResourceAfterBegin(header, r, scene);
+                    },
+                    else => return error.MalformedScene,
+                }
+            }
+        }
+
+        pub fn importEntity(self: *World, entity: Entity, r: *std.Io.Reader, scene: SceneCodec) !void {
+            switch (try scene.readEvent(scene.ptr, r)) {
+                .begin_entity => try self.importEntityAfterBegin(entity, r, scene),
+                else => return error.MalformedScene,
+            }
+        }
+
+        fn importEntityAfterBegin(self: *World, entity: Entity, r: *std.Io.Reader, scene: SceneCodec) !void {
+            try self.claimEntityId(entity);
+
+            while (true) {
+                switch (try scene.readEvent(scene.ptr, r)) {
+                    .end_entity => return,
+                    .begin_component => |header| {
+                        const codec = self.components.codecs.get(header.hash) orelse {
+                            try scene.skipComponentPayload(scene.ptr, header, r);
+                            try self.readEndComponent(r, scene);
+                            continue;
+                        };
+                        const flag = self.components.component_flags.getFlagFromHash(header.hash) orelse {
+                            try scene.skipComponentPayload(scene.ptr, header, r);
+                            try self.readEndComponent(r, scene);
+                            continue;
+                        };
+                        const info = self.components.component_flags.getId(flag);
+                        if (header.size != 0 and header.size != info.size) return error.ComponentListMismatch;
+
+                        const raw = try self.allocComponentTemp(info.size, info.alignment);
+                        defer self.freeComponentTemp(raw, info.alignment);
+
+                        try codec.deserialize(raw.ptr, self.memtator.world(), r);
+                        try self.components.addRaw(self.memtator.world(), self.world_tick, entity, flag, raw);
+
+                        try self.readEndComponent(r, scene);
+                    },
+                    else => return error.MalformedScene,
+                }
+            }
+        }
+
+        fn importResourceAfterBegin(self: *World, header: ResourceHeader, r: *std.Io.Reader, scene: SceneCodec) !void {
+            const codec = self.resources.codecs.get(header.hash) orelse {
+                try scene.skipResourcePayload(scene.ptr, header, r);
+                try self.readEndResource(r, scene);
+                return;
+            };
+            const flag = self.resources.resource_flags.getFlagFromHash(header.hash) orelse {
+                try scene.skipResourcePayload(scene.ptr, header, r);
+                try self.readEndResource(r, scene);
+                return;
+            };
+            const info = self.resources.resource_flags.getId(flag);
+            if (header.size != 0 and header.size != info.size) return error.ResourceListMismatch;
+
+            try codec.deserializeRegister(&self.resources, self.memtator.world(), r);
+            try self.readEndResource(r, scene);
+        }
+
+        fn readEndComponent(_: *World, r: *std.Io.Reader, scene: SceneCodec) !void {
+            switch (try scene.readEvent(scene.ptr, r)) {
+                .end_component => {},
+                else => return error.MalformedScene,
+            }
+        }
+
+        fn readEndResource(_: *World, r: *std.Io.Reader, scene: SceneCodec) !void {
+            switch (try scene.readEvent(scene.ptr, r)) {
+                .end_resource => {},
+                else => return error.MalformedScene,
+            }
+        }
+
+        fn allocComponentTemp(self: *World, size: usize, alignment: usize) ![]u8 {
+            if (size == 0) return &.{};
+            const ptr = self.memtator.world().rawAlloc(size, .fromByteUnits(alignment), @returnAddress()) orelse return error.OutOfMemory;
+            return ptr[0..size];
+        }
+
+        fn freeComponentTemp(self: *World, bytes: []u8, alignment: usize) void {
+            if (bytes.len == 0) return;
+            self.memtator.world().rawFree(bytes, .fromByteUnits(alignment), @returnAddress());
+        }
+
+        pub fn exportScene(self: *World, w: *std.Io.Writer, scene: SceneCodec, comptime Ctag: type) !void {
+            try scene.writeEvent(scene.ptr, .begin_scene, w);
+
+            const q = try QueryF(struct {e: Entity}, .With(Ctag)).fromWorld(self);
+            var it = q.iter();
+
+            while (it.next()) |en| {
+                self.exportEntity(en.e, w, scene) catch |err| switch (err) {
+                    error.EntityHasNoExportComponents => {},
+                    else => |e| return e,
+                };
+            }
+
+            try self.exportResources(w, scene);
+            try scene.writeEvent(scene.ptr, .end_scene, w);
+        }
+
+        pub fn exportEntity(self: *const World, entity: Entity, w: *std.Io.Writer, scene: SceneCodec) !void {
+            const arch_id = self.components.entity_lookup.get(entity) orelse return error.EntityNotFound;
+            const arch = &self.components.archtypes.items[arch_id];
+            const entity_arch_index = arch.entity_lookup.get(entity).?;
+
+            var has_export_comps = false;
+            for (arch.columns.items) |*col| {
+                _ = self.components.codecs.get(col.hash) orelse continue;
+                has_export_comps = true;
+            }
+
+            if (!has_export_comps) return error.EntityHasNoExportComponents;
+
+            try scene.writeEvent(scene.ptr, .{ .begin_entity = entity }, w);
+
+            for (arch.columns.items) |*col| {
+                const codec = self.components.codecs.get(col.hash) orelse continue;
+                const raw = arch.getSingleRaw(entity_arch_index, col);
+                const header = ComponentHeader{
+                    .hash = col.hash,
+                    .name = codec.name,
+                    .size = col.size,
+                };
+
+                try scene.writeEvent(scene.ptr, .{ .begin_component = header }, w);
+                try codec.serialize(raw.ptr, w);
+                try scene.writeEvent(scene.ptr, .{ .end_component = header }, w);
+            }
+
+            try scene.writeEvent(scene.ptr, .{ .end_entity = entity }, w);
+        }
+
+        pub fn exportResources(self: *const World, w: *std.Io.Writer, scene: SceneCodec) !void {
+            var it = self.resources.data.iterator();
+            while (it.next()) |entry| {
+                const hash = entry.key_ptr.*;
+                const codec = self.resources.codecs.get(hash) orelse continue;
+                const flag = self.resources.resource_flags.getFlagFromHash(hash) orelse continue;
+                const info = self.resources.resource_flags.getId(flag);
+                const header = ResourceHeader{
+                    .hash = hash,
+                    .name = codec.name,
+                    .size = info.size,
+                };
+
+                try scene.writeEvent(scene.ptr, .{ .begin_resource = header }, w);
+                try codec.serialize(entry.value_ptr.ctx, w);
+                try scene.writeEvent(scene.ptr, .{ .end_resource = header }, w);
+            }
+        }
+
         /// flush the command queue
         /// not thread safe. Should be called between scheduels
         pub fn flushCommands(self: *World) void {
@@ -1866,6 +2139,14 @@ pub fn ResourceRegistry(FlagInt: type) type {
 
         data: std.AutoHashMapUnmanaged(TypeID, Resource) = .empty,
         resource_flags: HeapFlagSet(FlagInt) = .{},
+        /// resource hash -> codec
+        codecs: std.AutoHashMapUnmanaged(u32, ResourceCodec) = .empty,
+
+        pub const ResourceCodec = struct {
+            name: []const u8,
+            serialize: *const fn (*const anyopaque, *std.Io.Writer) anyerror!void,
+            deserializeRegister: *const fn (*Self, std.mem.Allocator, *std.Io.Reader) anyerror!void,
+        };
 
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
             var it = self.data.iterator();
@@ -1877,6 +2158,11 @@ pub fn ResourceRegistry(FlagInt: type) type {
             const hash = hashType(T);
             const res = self.data.get(hash) orelse return null;
             return Resource.cast(res.ctx, T);
+        }
+
+        pub fn registerCodec(self: *Self, allocator: std.mem.Allocator, comptime R: type, codec: ResourceCodec) !void {
+            _ = self.resource_flags.getFlag(R);
+            try self.codecs.put(allocator, hashType(R), codec);
         }
 
         pub fn getOrDefault(self: *Self, gpa: std.mem.Allocator, comptime T: type) !*T {
@@ -1987,7 +2273,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             return @enumFromInt(index);
         }
 
-        pub fn getId(self: *Self, flag: Flag) *Info {
+        pub fn getId(self: *const Self, flag: Flag) *const Info {
             assert(@intFromEnum(flag) < self.registered_len);
             return &self.registered_buf[@intFromEnum(flag)];
         }
@@ -2635,11 +2921,24 @@ fn ComponentRegistry(FlagInt: type) type {
         archtypes_lookup: std.AutoHashMapUnmanaged(HeapFlagSet(FlagInt).Set, usize) = .empty,
         archtypes: std.ArrayList(ArchType(FlagInt)) = .empty,
 
+        /// comp hash -> codec
+        codecs: std.AutoHashMapUnmanaged(u32, ComponentCodec) = .empty,
+
         const FlagSet = HeapFlagSet(FlagInt);
         const CompFlag = FlagSet.Flag;
+        pub const ComponentCodec = struct {
+            name: []const u8,
+            serialize: *const fn (*const anyopaque, *std.Io.Writer) anyerror!void,
+            deserialize: *const fn (*anyopaque, std.mem.Allocator, *std.Io.Reader) anyerror!void,
+        };
 
         const Self = @This();
         const CHUNK_SIZE: usize = 64;
+
+        pub fn registerCodec(self: *Self, allocator: std.mem.Allocator, comptime C: type, codec: ComponentCodec) !void {
+            _ = self.component_flags.getFlag(C);
+            try self.codecs.put(allocator, hashType(C), codec);
+        }
 
         pub fn add(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, comp: anytype) !void {
             const CompType = @TypeOf(comp);

@@ -328,3 +328,235 @@ test "temporary queries allocate match state from frame arena" {
 
     try expect(after == before);
 }
+
+test "scene codec exports only registered component codecs" {
+    const Foo = struct { n: i32 };
+    const Bar = struct { n: i32 };
+
+    const app = App(.{});
+    var src = try app.init(std.testing.allocator, testIo());
+    defer src.deinit();
+    var dst = try app.init(std.testing.allocator, testIo());
+    defer dst.deinit();
+
+    const foo_codec = struct {
+        fn serialize(foo: *const Foo, w: *std.Io.Writer) !void {
+            try w.writeInt(i32, foo.n, .little);
+        }
+
+        fn deserialize(foo: *Foo, _: std.mem.Allocator, r: *std.Io.Reader) !void {
+            foo.* = .{ .n = try r.takeInt(i32, .little) };
+        }
+    };
+
+    try src.registerComponentCodec(Foo, "Foo", foo_codec.serialize, foo_codec.deserialize);
+    try dst.registerComponentCodec(Foo, "Foo", foo_codec.serialize, foo_codec.deserialize);
+
+    const scene_impl = struct {
+        fn write(_: *anyopaque, event: app.SceneWriteEvent, w: *std.Io.Writer) !void {
+            switch (event) {
+                .begin_scene => try w.writeByte('S'),
+                .end_scene => try w.writeByte('s'),
+                .begin_entity => |entity| {
+                    try w.writeByte('E');
+                    try w.writeInt(u64, @intFromEnum(entity), .little);
+                },
+                .end_entity => try w.writeByte('e'),
+                .begin_component => |header| {
+                    try w.writeByte('C');
+                    try w.writeInt(u32, header.hash, .little);
+                    try w.writeInt(u32, @intCast(header.size), .little);
+                },
+                .end_component => try w.writeByte('c'),
+                .begin_resource => |header| {
+                    try w.writeByte('R');
+                    try w.writeInt(u32, header.hash, .little);
+                    try w.writeInt(u32, @intCast(header.size), .little);
+                },
+                .end_resource => try w.writeByte('r'),
+            }
+        }
+
+        fn read(_: *anyopaque, r: *std.Io.Reader) !app.SceneReadEvent {
+            return switch (try r.takeByte()) {
+                'S' => .begin_scene,
+                's' => .end_scene,
+                'E' => .{ .begin_entity = @enumFromInt(try r.takeInt(u64, .little)) },
+                'e' => .end_entity,
+                'C' => .{ .begin_component = .{
+                    .hash = try r.takeInt(u32, .little),
+                    .name = "",
+                    .size = try r.takeInt(u32, .little),
+                } },
+                'c' => .end_component,
+                'R' => .{ .begin_resource = .{
+                    .hash = try r.takeInt(u32, .little),
+                    .name = "",
+                    .size = try r.takeInt(u32, .little),
+                } },
+                'r' => .end_resource,
+                else => error.MalformedScene,
+            };
+        }
+
+        fn skip(_: *anyopaque, header: app.ComponentHeader, r: *std.Io.Reader) !void {
+            try r.discardAll(header.size);
+        }
+
+        fn skipResource(_: *anyopaque, header: app.ResourceHeader, r: *std.Io.Reader) !void {
+            try r.discardAll(header.size);
+        }
+    };
+
+    var scene_state: u8 = 0;
+    const scene = app.SceneCodec{
+        .ptr = &scene_state,
+        .writeEvent = scene_impl.write,
+        .readEvent = scene_impl.read,
+        .skipComponentPayload = scene_impl.skip,
+        .skipResourcePayload = scene_impl.skipResource,
+    };
+
+    const entity = src.nextEntityId();
+    try src.components.add(src.memtator.world(), 0, entity, Foo{ .n = 42 });
+    try src.components.add(src.memtator.world(), 0, entity, Bar{ .n = 99 });
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try src.exportEntity(entity, &aw.writer, scene);
+
+    var reader: std.Io.Reader = .fixed(aw.writer.buffered());
+    const imported = Entity.new(77);
+    try dst.importEntity(imported, &reader, scene);
+
+    const foo = dst.components.getSingle(imported, Foo).?;
+    try expect(foo.n == 42);
+    try expect(dst.components.getSingle(imported, Bar) == null);
+}
+
+test "scene codec exports entities before registered resources" {
+    const Foo = struct { n: i32 };
+    const Res = struct { n: i32 };
+    const OtherRes = struct { n: i32 };
+
+    const app = App(.{});
+    var src = try app.init(std.testing.allocator, testIo());
+    defer src.deinit();
+    var dst = try app.init(std.testing.allocator, testIo());
+    defer dst.deinit();
+
+    const i32_codec = struct {
+        fn serializeFoo(foo: *const Foo, w: *std.Io.Writer) !void {
+            try w.writeInt(i32, foo.n, .little);
+        }
+
+        fn deserializeFoo(foo: *Foo, _: std.mem.Allocator, r: *std.Io.Reader) !void {
+            foo.* = .{ .n = try r.takeInt(i32, .little) };
+        }
+
+        fn serializeRes(res: *const Res, w: *std.Io.Writer) !void {
+            try w.writeInt(i32, res.n, .little);
+        }
+
+        fn deserializeRes(res: *Res, _: std.mem.Allocator, r: *std.Io.Reader) !void {
+            res.* = .{ .n = try r.takeInt(i32, .little) };
+        }
+    };
+
+    try src.registerComponentCodec(Foo, "Foo", i32_codec.serializeFoo, i32_codec.deserializeFoo);
+    try dst.registerComponentCodec(Foo, "Foo", i32_codec.serializeFoo, i32_codec.deserializeFoo);
+    try src.registerResourceCodec(Res, "Res", i32_codec.serializeRes, i32_codec.deserializeRes);
+    try dst.registerResourceCodec(Res, "Res", i32_codec.serializeRes, i32_codec.deserializeRes);
+
+    const scene_impl = struct {
+        fn write(_: *anyopaque, event: app.SceneWriteEvent, w: *std.Io.Writer) !void {
+            switch (event) {
+                .begin_scene => try w.writeByte('S'),
+                .end_scene => try w.writeByte('s'),
+                .begin_entity => |entity| {
+                    try w.writeByte('E');
+                    try w.writeInt(u64, @intFromEnum(entity), .little);
+                },
+                .end_entity => try w.writeByte('e'),
+                .begin_component => |header| {
+                    try w.writeByte('C');
+                    try w.writeInt(u32, header.hash, .little);
+                    try w.writeInt(u32, @intCast(header.size), .little);
+                },
+                .end_component => try w.writeByte('c'),
+                .begin_resource => |header| {
+                    try w.writeByte('R');
+                    try w.writeInt(u32, header.hash, .little);
+                    try w.writeInt(u32, @intCast(header.size), .little);
+                },
+                .end_resource => try w.writeByte('r'),
+            }
+        }
+
+        fn read(_: *anyopaque, r: *std.Io.Reader) !app.SceneReadEvent {
+            return switch (try r.takeByte()) {
+                'S' => .begin_scene,
+                's' => .end_scene,
+                'E' => .{ .begin_entity = @enumFromInt(try r.takeInt(u64, .little)) },
+                'e' => .end_entity,
+                'C' => .{ .begin_component = .{
+                    .hash = try r.takeInt(u32, .little),
+                    .name = "",
+                    .size = try r.takeInt(u32, .little),
+                } },
+                'c' => .end_component,
+                'R' => .{ .begin_resource = .{
+                    .hash = try r.takeInt(u32, .little),
+                    .name = "",
+                    .size = try r.takeInt(u32, .little),
+                } },
+                'r' => .end_resource,
+                else => error.MalformedScene,
+            };
+        }
+
+        fn skipComponent(_: *anyopaque, header: app.ComponentHeader, r: *std.Io.Reader) !void {
+            try r.discardAll(header.size);
+        }
+
+        fn skipResource(_: *anyopaque, header: app.ResourceHeader, r: *std.Io.Reader) !void {
+            try r.discardAll(header.size);
+        }
+    };
+
+    var scene_state: u8 = 0;
+    const scene = app.SceneCodec{
+        .ptr = &scene_state,
+        .writeEvent = scene_impl.write,
+        .readEvent = scene_impl.read,
+        .skipComponentPayload = scene_impl.skipComponent,
+        .skipResourcePayload = scene_impl.skipResource,
+    };
+
+    const entity = src.nextEntityId();
+    try src.components.add(src.memtator.world(), 0, entity, Foo{ .n = 7 });
+    try src.addResource(Res{ .n = 123 });
+    try src.addResource(OtherRes{ .n = 999 });
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try src.exportScene(&aw.writer, scene, Foo);
+    const bytes = aw.writer.buffered();
+
+    try expect(bytes[0] == 'S');
+    try expect(bytes[1] == 'E');
+    try expect(bytes[25] == 'R');
+    try expect(bytes[39] == 's');
+
+    var reader: std.Io.Reader = .fixed(bytes);
+    try dst.importScene(&reader, scene);
+
+    const foo = dst.components.getSingle(entity, Foo).?;
+    try expect(foo.n == 7);
+
+    const res = try dst.resource(Res);
+    try expect(res.n == 123);
+    try expect(dst.resource(OtherRes) == EcsError.ResourceNotFound);
+}
