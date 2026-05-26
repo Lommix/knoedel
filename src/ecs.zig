@@ -618,10 +618,11 @@ pub fn App(comptime desc: AppDesc) type {
         }
 
         fn despawn_with_children(self: *World, ent: Entity) EcsError!void {
+            const arch_id = self.components.entity_lookup.get(ent) orelse return;
 
             // ----------------------------------------
             // hook
-            const mask = self.components.archtypes.items[self.components.entity_lookup.get(ent).?].mask;
+            const mask = self.components.archtypes.items[arch_id].mask;
             const hook_mask = mask.intersectWith(self.hooks.has_despawn_hook);
             var it = hook_mask.iterator();
             while (it.next()) |flag| {

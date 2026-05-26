@@ -308,6 +308,23 @@ test "claimEntityId despawns existing slot generation" {
     try expect(world.entityCount() == 1);
 }
 
+test "despawn tolerates stale child ids" {
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator, testIo());
+    defer world.deinit();
+
+    const parent = world.nextEntityId();
+    var children = e.Children{};
+    try children.items.append(world.memtator.world(), Entity.new(999));
+    try world.components.add(world.memtator.world(), 0, parent, children);
+
+    const cmd = world.getCommands();
+    try cmd.despawn(parent);
+    world.update();
+
+    try expect(world.entityCount() == 0);
+}
+
 test "temporary queries allocate match state from frame arena" {
     const Foo = struct { n: i32 };
 
