@@ -1831,13 +1831,13 @@ pub const Filter = union(enum) {
             o.added = &.{};
             o.changed = &.{};
         }
-        _ = self.collectTickBranches(&out, 0, &.{}, &.{});
+        _ = self.collectTickBranches(out[0..], 0, &.{}, &.{});
         return out;
     }
 
     fn collectTickBranches(
         comptime self: *const Filter,
-        out: *[self.BranchCount()]TickHashes,
+        out: []TickHashes,
         comptime offset: usize,
         comptime inherited_added: []const u32,
         comptime inherited_changed: []const u32,
@@ -1899,7 +1899,7 @@ pub const Filter = union(enum) {
             cb.added = &.{};
             cb.changed = &.{};
         }
-        _ = child.collectTickBranches(&child_branches, 0, inherited_added, inherited_changed);
+        _ = child.collectTickBranches(child_branches[0..], 0, inherited_added, inherited_changed);
         var off = offset;
         inline for (0..comptime child.BranchCount()) |i| {
             off = andTickBranches(children, idx + 1, out, off, child_branches[i].added, child_branches[i].changed);

@@ -346,6 +346,57 @@ test "temporary queries allocate match state from frame arena" {
     try expect(after == before);
 }
 
+test "query filters support Or and Or3 shorthand" {
+    const Foo = struct { n: i32 };
+    const Bar = struct { n: i32 };
+    const Baz = struct { n: i32 };
+
+    const app = App(.{});
+    var world = try app.init(std.testing.allocator, testIo());
+    defer world.deinit();
+
+    const foo_ent = world.nextEntityId();
+    const bar_ent = world.nextEntityId();
+    const baz_ent = world.nextEntityId();
+    try world.components.add(world.memtator.world(), world.world_tick, foo_ent, Foo{ .n = 1 });
+    try world.components.add(world.memtator.world(), world.world_tick, bar_ent, Bar{ .n = 2 });
+    try world.components.add(world.memtator.world(), world.world_tick, baz_ent, Baz{ .n = 3 });
+
+    const q_or = try app.QueryF(
+        struct { entity: Entity },
+        .Or(.With(Foo), .With(Bar)),
+    ).fromWorld(world);
+    try expect(q_or.count() == 2);
+
+    const q_or3 = try app.QueryF(
+        struct { entity: Entity },
+        .Or3(.With(Foo), .With(Bar), .With(Baz)),
+    ).fromWorld(world);
+    try expect(q_or3.count() == 3);
+
+    const q_or_ticks = try app.QueryF(
+        struct { entity: Entity },
+        .Or(.Added(Foo), .Changed(Bar)),
+    ).fromWorld(world);
+    var or_ticks_it = q_or_ticks.iter();
+    var or_ticks_count: u32 = 0;
+    while (or_ticks_it.next()) |_| {
+        or_ticks_count += 1;
+    }
+    try expect(or_ticks_count == 2);
+
+    const q_or3_ticks = try app.QueryF(
+        struct { entity: Entity },
+        .Or3(.Added(Foo), .Changed(Bar), .With(Baz)),
+    ).fromWorld(world);
+    var or3_ticks_it = q_or3_ticks.iter();
+    var or3_ticks_count: u32 = 0;
+    while (or3_ticks_it.next()) |_| {
+        or3_ticks_count += 1;
+    }
+    try expect(or3_ticks_count == 3);
+}
+
 test "scene codec exports only registered component codecs" {
     const Foo = struct { n: i32 };
     const Bar = struct { n: i32 };
