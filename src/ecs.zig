@@ -546,7 +546,7 @@ pub fn App(comptime desc: AppDesc) type {
         pub fn exportScene(self: *World, w: *std.Io.Writer, scene: SceneCodec, comptime Ctag: type) !void {
             try scene.writeEvent(scene.ptr, .begin_scene, w);
 
-            const q = try QueryF(struct {e: Entity}, .With(Ctag)).fromWorld(self);
+            const q = try QueryF(struct { e: Entity }, .With(Ctag)).fromWorld(self);
             var it = q.iter();
 
             while (it.next()) |en| {
@@ -1374,10 +1374,23 @@ pub fn App(comptime desc: AppDesc) type {
                 try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
-            /// remove a component from entity
-            pub fn remove(self: *const Self, entity: Entity, comptime C: type) EcsError!void {
-                const cmd = try removeCommand(self.frame_gpa, entity, C);
-                try self.reg.add(self.world.io, self.frame_gpa, cmd);
+            /// remove one or many components from entity
+            /// allowes type or tuple of types.
+            pub fn remove(self: *const Self, entity: Entity, comptime C: anytype) EcsError!void {
+                const Info = @typeInfo(@TypeOf(C));
+
+                switch (Info) {
+                    .@"struct" => |str| {
+                        if (!str.is_tuple) @compileError("Components to be removed must be single type or tuple of types");
+
+                        const cmd = try removeBundleCommand(self.frame_gpa, entity, C);
+                        try self.reg.add(self.world.io, self.frame_gpa, cmd);
+                    },
+                    else => {
+                        const cmd = try removeCommand(self.frame_gpa, entity, C);
+                        try self.reg.add(self.world.io, self.frame_gpa, cmd);
+                    },
+                }
             }
 
             /// add a subcommand
@@ -1410,6 +1423,11 @@ pub fn App(comptime desc: AppDesc) type {
 
             pub fn addChild(self: *const Self, parent: Entity, child: Entity) EcsError!void {
                 const cmd = try addChildCommand(self.frame_gpa, parent, child);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
+            }
+
+            pub fn removeChild(self: *const Self, parent: Entity, child: Entity) EcsError!void {
+                const cmd = try removeChildCommand(self.frame_gpa, parent, child);
                 try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
@@ -1492,6 +1510,38 @@ pub fn App(comptime desc: AppDesc) type {
             };
         }
 
+        fn removeChildCommand(allocator: std.mem.Allocator, parent: Entity, child: Entity) EcsError!Command {
+            const Args = struct {
+                parent: Entity,
+                child: Entity,
+            };
+
+            var arg_ptr = try allocator.create(Args);
+            arg_ptr.parent = parent;
+            arg_ptr.child = child;
+
+            return Command{
+                .ptr = arg_ptr,
+                .run = (struct {
+                    fn run(ctx: *anyopaque, world: *World) EcsError!void {
+                        const gpa = world.memtator.world();
+                        const args: *Args = @ptrCast(@alignCast(ctx));
+
+                        const remov_cmd = try removeCommand(gpa, args.child, Parent);
+                        try remov_cmd.run(remov_cmd.ptr, world);
+
+                        if (world.components.getSingleAndUpdate(world.world_tick, args.parent, Children)) |children| {
+                            var index: ?usize = null;
+                            for (children.items.items, 0..) |c, i| {
+                                if (c == args.child) index = i;
+                            }
+                            if (index) |i| _ = children.items.swapRemove(i);
+                        }
+                    }
+                }).run,
+            };
+        }
+
         fn insertResourceCommand(allocator: std.mem.Allocator, res: anytype) EcsError!Command {
             const ResourceType = @TypeOf(res);
             const ptr = try allocator.create(ResourceType);
@@ -1541,6 +1591,32 @@ pub fn App(comptime desc: AppDesc) type {
                             }
 
                             try world.components.remove(world.memtator.world(), ent.*, C);
+                        }
+                    }
+                }).run,
+            };
+        }
+
+        fn removeBundleCommand(allocator: std.mem.Allocator, entity: Entity, comptime B: anytype) EcsError!Command {
+            const ptr = try allocator.create(Entity);
+            ptr.* = entity;
+
+            return Command{
+                .ptr = ptr,
+                .run = (struct {
+                    fn run(ctx: *anyopaque, world: *World) EcsError!void {
+                        const ent: *Entity = @ptrCast(@alignCast(ctx));
+                        if (world.isValid(ent.*)) {
+                            inline for (B) |CompType| {
+                                const flag = world.components.component_flags.getFlag(CompType);
+
+                                if (world.hooks.remove_hooks.contains(flag)) {
+                                    const comp = world.components.getSingle(ent.*, CompType) orelse return;
+                                    try world.hooks.runRemoveHook(flag, comp, ent.*, world);
+                                }
+
+                                try world.components.remove(world.memtator.world(), ent.*, CompType);
+                            }
                         }
                     }
                 }).run,
@@ -3391,6 +3467,14 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
         pub fn first(self: *const Self) ?QueryStruct {
             var it = self.iter();
             return it.next();
+        }
+
+        pub fn contains(self: *const Self, entity: Entity) bool {
+            const arch_id = self.reg.entity_lookup.get(entity) orelse return false;
+            for (self.state.matched_archtypes.items) |*en| {
+                if (en.arch_id == arch_id) return true;
+            }
+            return false;
         }
 
         pub fn get(self: *const Self, entity: Entity) EcsError!QueryStruct {
