@@ -21,7 +21,10 @@ Heavily inspired by the rust ECS `Bevy`.
 - Manual control
 - Can run inside a dylib (re-add plugins after reload). Enables hot reloading!
 
-Example:
+## The S in ECS. How does it work?
+
+Every System is a function, composed of arguments that implement a `fromWorld` function and mark what they need as mutable and immutable via an `addAccess` function.
+The scheduler will then sort all your systems by access and run in parallel what does not collide (per schedule).
 
 ## How to run
 
