@@ -643,7 +643,7 @@ pub fn App(comptime desc: AppDesc) type {
             try self.components.despawn(self.memtator.world(), ent);
         }
 
-        fn despawn(self: *World, ent: Entity) EcsError!void {
+        fn despawn(self: *World, ent: Entity, include_children: bool) EcsError!void {
             if (!self.isValid(ent)) return;
             // remove from parent children
             if (self.components.getSingle(ent, Parent)) |parent| {
@@ -656,7 +656,17 @@ pub fn App(comptime desc: AppDesc) type {
                 }
             }
 
-            try self.despawn_with_children(ent);
+            if (include_children) {
+                try self.despawn_with_children(ent);
+            } else {
+                if (self.components.getSingle(ent, Children)) |children| {
+                    for (children.items.items) |child_entity| {
+                        try self.components.remove(self.memtator.world(), child_entity, Parent);
+                    }
+                }
+
+                try self.components.despawn(self.memtator.world(), ent);
+            }
             try self.entities.unused.append(self.memtator.world(), ent);
         }
 
@@ -690,7 +700,7 @@ pub fn App(comptime desc: AppDesc) type {
         /// occupying the same slot first.
         pub fn claimEntityId(self: *World, entity: Entity) EcsError!void {
             if (self.liveEntityWithId(entity.id())) |live_entity| {
-                try self.despawn(live_entity);
+                try self.despawn(live_entity, true);
             }
 
             self.entities.entity_mutex.lockUncancelable(self.io);
@@ -1362,15 +1372,26 @@ pub fn App(comptime desc: AppDesc) type {
                 return entity;
             }
 
+            /// spawns an empty entity
+            pub fn spawnEmpty(self: *const Self) Entity {
+                return self.world.nextEntityId();
+            }
+
             /// spawn with a specific pre-claimed entity id
             pub fn spawnWithEntity(self: *const Self, entity: Entity, bundle: anytype) EcsError!void {
                 const cmd = try insertCommand(self.frame_gpa, entity, bundle);
                 try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
-            /// despawns an entity
+            /// despawns an entity with children recursive
             pub fn despawn(self: *const Self, entity: Entity) EcsError!void {
-                const cmd = try despawnCommand(self.frame_gpa, entity);
+                const cmd = try despawnCommand(self.frame_gpa, entity, true);
+                try self.reg.add(self.world.io, self.frame_gpa, cmd);
+            }
+
+            /// despawns an entity and unlink their children without despawning them
+            pub fn despawnUnlink(self: *const Self, entity: Entity) EcsError!void {
+                const cmd = try despawnCommand(self.frame_gpa, entity, false);
                 try self.reg.add(self.world.io, self.frame_gpa, cmd);
             }
 
@@ -1558,7 +1579,7 @@ pub fn App(comptime desc: AppDesc) type {
             };
         }
 
-        fn despawnCommand(allocator: std.mem.Allocator, entity: Entity) EcsError!Command {
+        fn despawnCommand(allocator: std.mem.Allocator, entity: Entity, comptime with_children: bool) EcsError!Command {
             const ptr = try allocator.create(Entity);
             ptr.* = entity;
 
@@ -1567,7 +1588,7 @@ pub fn App(comptime desc: AppDesc) type {
                 .run = (struct {
                     fn run(ctx: *anyopaque, world: *World) EcsError!void {
                         const ent: *Entity = @ptrCast(@alignCast(ctx));
-                        try world.despawn(ent.*);
+                        try world.despawn(ent.*, with_children);
                     }
                 }).run,
             };
