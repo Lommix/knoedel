@@ -374,5 +374,5 @@ zig fetch --save git+https://github.com/Lommix/knoedel
 ```zig
 const knoedel_dep = b.dependency("knoedel", .{});
 //..
-your_game.root_module.addImport("knoedel", knoedel_dep.knoedel.module("knoedel"));
+your_game.root_module.addImport("knoedel", knoedel_dep.module("knoedel"));
 ```
