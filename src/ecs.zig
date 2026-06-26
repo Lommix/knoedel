@@ -1326,14 +1326,19 @@ pub fn App(comptime desc: AppDesc) type {
         // Allocation
         // --------------------------------------
         pub const Alloc = struct {
+            /// frame arena
             frame: std.mem.Allocator,
+            /// app world arena
             world: std.mem.Allocator,
+            /// direct gpa access, unmanaged.
+            gpa: std.mem.Allocator,
             io: std.Io,
 
             pub fn fromWorld(world: *World) EcsError!Alloc {
                 return .{
                     .frame = world.memtator.frame(),
                     .world = world.memtator.world(),
+                    .gpa = world.memtator.parent,
                     .io = world.io,
                 };
             }
