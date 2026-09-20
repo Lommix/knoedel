@@ -828,7 +828,7 @@ test "scheduler compaction preserves dependencies and order across passes" {
             } else {
                 try world.addSystem(Schedule.update, .{ &Sys.first, &Sys.second, &Sys.third });
             }
-            const schedule = world.systems.schedule_order.getPtr(0).?;
+            const schedule = world.systems.schedule_order.getPtr(.from(Schedule.update)).?;
             // Put a blocked system first, forcing the sequential scheduler to revisit survivors.
             if (chain) std.mem.swap(@TypeOf(schedule.systems.items[0]), &schedule.systems.items[0], &schedule.systems.items[1]);
             if (parallel) {
