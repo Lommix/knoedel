@@ -331,11 +331,11 @@ test "despawn tolerates stale child ids" {
     try expect(world.entityCount() == 0);
 }
 
-test "despawn and despawnUnlink run OnDespawn hooks" {
+test "world.deinit(), despawn and despawnUnlink run OnDespawn hooks" {
     const app = App(.{});
     var world = try app.init(std.testing.allocator, testIo());
     const cmd = world.getCommands();
-    defer world.deinit();
+    // world.deinit is last because of the test 
 
     const Counters = struct {
         pub var appends: usize = 0;
@@ -393,8 +393,6 @@ test "despawn and despawnUnlink run OnDespawn hooks" {
     });
 
     world.update();
-    // Child of ent_unlink
-    const child = world.components.getSingle(ent_unlink, e.Children).?.items.items[0];
 
     const expected_ents = 4;
     const expected_appends = 4;
@@ -402,7 +400,7 @@ test "despawn and despawnUnlink run OnDespawn hooks" {
     const expected_despawns_parent = 2;
     const expected_despawns_unlink = expected_despawns_parent + 1;
 
-    // Includes child despawn
+    // Includes dangling child despawn
     const expected_despawns_final = expected_despawns_unlink + 1;
 
     try expect(world.entityCount() == expected_ents);
@@ -418,9 +416,8 @@ test "despawn and despawnUnlink run OnDespawn hooks" {
     world.update();
     try expect(Counters.despawnHook_calls == expected_despawns_unlink);
 
-    // Despawn child to prevent memory leak
-    try cmd.despawnUnlink(child);
-    world.update();
+    // World.deinit must run onDespawn hooks to prevent memory leak
+    world.deinit();
 
     // Final checks
     try expect(Counters.appends == expected_appends);

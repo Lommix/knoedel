@@ -180,6 +180,19 @@ pub fn App(comptime desc: AppDesc) type {
 
         pub fn deinit(self: *World) void {
             const gpa = self.memtator.world();
+
+            // Run OnDespawn hooks on every entity ignoring children
+            // because they are in entity_lookup.
+            var it = self.components.entity_lookup.iterator();
+            while (it.next()) |entry| {
+                self.runDespawnHooks(entry.key_ptr.*) catch |err| {
+                    std.log.err(
+                        "OnDespawn hook failed during World.deinit for entity {any}: {any}",
+                        .{ entry.key_ptr.*, err },
+                    );
+                };
+            }
+
             self.entities.unused.deinit(gpa);
             self.commands.queue.deinit(gpa);
             self.components.releaseAllComponentRegistryMemory(gpa);
