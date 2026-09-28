@@ -1876,7 +1876,7 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         }
 
         pub fn build_access_set(self: *Self, flags: *FlagSet) void {
-            var include = FlagSet.Set.initEmpty();
+            var include = FlagSet.Set.empty;
 
             const QueryInfo = @typeInfo(Q);
             inline for (QueryInfo.@"struct".field_types) |f_type| {
@@ -1919,14 +1919,14 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
 
 fn AccessSet(FlagInt: type) type {
     return struct {
-        with: HeapFlagSet(FlagInt).Set = .initEmpty(),
-        without: HeapFlagSet(FlagInt).Set = .initEmpty(),
-        added: HeapFlagSet(FlagInt).Set = .initEmpty(),
-        changed: HeapFlagSet(FlagInt).Set = .initEmpty(),
+        with: HeapFlagSet(FlagInt).Set = .empty,
+        without: HeapFlagSet(FlagInt).Set = .empty,
+        added: HeapFlagSet(FlagInt).Set = .empty,
+        changed: HeapFlagSet(FlagInt).Set = .empty,
 
         pub fn matches(self: *const @This(), other: HeapFlagSet(FlagInt).Set) bool {
             if (!self.with.intersectWith(other).eql(self.with)) return false;
-            return self.without.intersectWith(other).eql(.initEmpty());
+            return self.without.intersectWith(other).eql(.empty);
         }
     };
 }
@@ -2099,7 +2099,7 @@ pub const Filter = union(enum) {
                     s.with.insert(flag);
                     s.added.insert(flag);
                 } else {
-                    s.without = .initFull();
+                    s.without = .full;
                 }
                 out[offset] = s;
                 return offset + 1;
@@ -2110,7 +2110,7 @@ pub const Filter = union(enum) {
                     s.with.insert(flag);
                     s.changed.insert(flag);
                 } else {
-                    s.without = .initFull();
+                    s.without = .full;
                 }
 
                 out[offset] = s;
@@ -2121,7 +2121,7 @@ pub const Filter = union(enum) {
                 if (flags.getFlagFromHash(hash)) |flag| {
                     s.with.insert(flag);
                 } else {
-                    s.without = .initFull();
+                    s.without = .full;
                 }
                 out[offset] = s;
                 return offset + 1;
@@ -2507,14 +2507,14 @@ pub fn Access(FlagInt: type) type {
         }
 
         inline fn comp_compatible(self: *const Self, other: *const Self) bool {
-            const empty = FlagSet.Set.initEmpty();
+            const empty = FlagSet.Set.empty;
             if (!self.comp_read_write.intersectWith(other.comp_write).eql(empty)) return false;
             if (!self.comp_write.intersectWith(other.comp_read_write).eql(empty)) return false;
             return true;
         }
 
         inline fn res_compatible(self: *const Self, other: *const Self) bool {
-            const empty = FlagSet.Set.initEmpty();
+            const empty = FlagSet.Set.empty;
             if (!self.res_read_write.intersectWith(other.res_write).eql(empty)) return false;
             if (!self.res_write.intersectWith(other.res_read_write).eql(empty)) return false;
             return true;
@@ -2573,7 +2573,7 @@ pub fn ArchType(FlagInt: type) type {
         };
         /// allocate in chunks of:
         chunk_size: usize = 512,
-        mask: HeapFlagSet(FlagInt).Set = .initEmpty(),
+        mask: HeapFlagSet(FlagInt).Set = .empty,
         bytes: []u8 = &.{},
         alignment: usize = 0,
         allocated_table_alignment: std.mem.Alignment = .fromByteUnits(16),
@@ -3190,7 +3190,7 @@ fn ComponentRegistry(FlagInt: type) type {
             const flag = self.component_flags.getFlag(CompType);
 
             const current_arch_id = self.entity_lookup.get(entity);
-            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.empty;
 
             if (mask.contains(flag)) {
                 const arch = &self.archtypes.items[current_arch_id.?];
@@ -3236,7 +3236,7 @@ fn ComponentRegistry(FlagInt: type) type {
         /// Insert raw component bytes into an entity by flag. Used for deserialization.
         pub fn addRaw(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, flag: CompFlag, bytes: []const u8) !void {
             const current_arch_id = self.entity_lookup.get(entity);
-            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.empty;
 
             if (mask.contains(flag)) {
                 const arch = &self.archtypes.items[current_arch_id.?];
@@ -3295,7 +3295,7 @@ fn ComponentRegistry(FlagInt: type) type {
             const current_arch_id = self.entity_lookup.get(entity);
             const is_new_entity = current_arch_id == null;
 
-            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.empty;
             const old_mask = mask;
             inline for (bundle) |comp| {
                 const CompType = @TypeOf(comp);
@@ -3445,7 +3445,7 @@ fn ArchScope(FlagInt: type) type {
 fn ArchSopeIter(FlagInt: type, comptime arch_only: bool) type {
     return struct {
         const Self = @This();
-        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        const empty = HeapFlagSet(FlagInt).Set.empty;
 
         const Result = if (arch_only) *ArchType(FlagInt) else ArchScope(FlagInt);
 
@@ -3492,7 +3492,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *con
 
     return struct {
         const Self = @This();
-        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        const empty = HeapFlagSet(FlagInt).Set.empty;
         const ArchResult = if (ArchOnly) *Arch else ArchScope(FlagInt);
 
         flags: *HeapFlagSet(FlagInt),
@@ -3906,10 +3906,10 @@ pub fn WorldAccess(desc: AppDesc) type {
         inner: *App(desc),
 
         pub fn addAccess(_: *App(desc), access: *Access(desc.FlagInt)) void {
-            access.res_read_write = .initFull();
-            access.res_write = .initFull();
-            access.comp_read_write = .initFull();
-            access.comp_write = .initFull();
+            access.res_read_write = .full;
+            access.res_write = .full;
+            access.comp_read_write = .full;
+            access.comp_write = .full;
         }
 
         pub fn fromWorld(app: *App(desc)) EcsError!@This() {

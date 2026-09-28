@@ -80,7 +80,7 @@ pub fn defaultValue(comptime T: type) T {
         },
         .pointer => return "",
         .optional => return null,
-        .array => |arr| return [_]arr.child{defaultValue(arr.child)} ** arr.len,
+        .array => |arr| return @splat(defaultValue(arr.child)),
         .vector => |vec| return @splat(defaultValue(vec.child)),
         .@"union" => |un| {
             const first_name = un.field_names[0];
