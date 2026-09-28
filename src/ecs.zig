@@ -1290,7 +1290,7 @@ pub fn App(comptime desc: AppDesc) type {
                 const _read = [1]u32{hashType(R)};
                 inner: *const R = undefined,
 
-                fn fromWorld(world: *const World) EcsError!Self {
+                pub fn fromWorld(world: *const World) EcsError!Self {
                     var self = Self{};
                     self.inner = try world.resource(R);
                     return self;
@@ -1313,7 +1313,7 @@ pub fn App(comptime desc: AppDesc) type {
                 const _read = [1]u32{hashType(R)};
                 const _write = _read;
                 inner: *R = undefined,
-                fn fromWorld(world: *World) EcsError!Self {
+                pub fn fromWorld(world: *World) EcsError!Self {
                     var self = Self{};
                     self.inner = try world.resource(R);
                     return self;
@@ -2215,7 +2215,7 @@ pub fn Local(comptime T: type) type {
         inner: *T = undefined,
 
         const Self = @This();
-        const is_local_marker: bool = true;
+        pub const is_local_marker: bool = true;
         const innerType = T;
 
         pub inline fn get(self: *Self) *T {
@@ -2226,7 +2226,7 @@ pub fn Local(comptime T: type) type {
 
 pub fn Has(comptime T: type) type {
     return struct {
-        const _is_has: bool = true;
+        pub const _is_has: bool = true;
         const inner = T;
         val: bool = false,
     };
@@ -2448,7 +2448,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
 
         fn makePrintFn(comptime T: type) ?*const fn (*const anyopaque, *std.Io.Writer) EcsError!void {
             return (struct {
-                fn fmt(ptr: *const anyopaque, w: *std.Io.Writer) EcsError!void {
+                pub fn fmt(ptr: *const anyopaque, w: *std.Io.Writer) EcsError!void {
                     const comp: *const T = @ptrCast(@alignCast(ptr));
                     if (@hasDecl(T, "fmt")) {
                         try comp.fmt(w);
@@ -3724,7 +3724,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             return c;
         }
 
-        fn setWorldTick(self: *Self, tick: u32) void {
+        pub fn setWorldTick(self: *Self, tick: u32) void {
             self.world_tick = tick;
         }
 
