@@ -43,7 +43,7 @@ pub fn Knoedel(cfg: AppDesc) type {
         pub const hashType = ecs.hashType;
         pub const Children = ecs.Children;
         pub const Parent = ecs.Parent;
-        pub const ResouceRegistry = ecs.ResourceRegistry(cfg.FlagInt);
+        pub const ResourceRegistry = ecs.ResourceRegistry(cfg.FlagInt);
         pub const ConditionFn = App.SystemRegistry.ConditionFn;
         pub const SystemFn = App.SystemRegistry.SystemFn;
         pub const Error = ecs.EcsError;
