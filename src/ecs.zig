@@ -311,7 +311,7 @@ pub fn App(comptime desc: AppDesc) type {
         }
 
         /// update tick
-        /// runs all remainig commands and resets the frame arena
+        /// runs all remaining commands and resets the frame arena
         pub fn update(self: *World) void {
             self.flushCommands();
             _ = self.memtator.resetFrame();
@@ -592,7 +592,7 @@ pub fn App(comptime desc: AppDesc) type {
         }
 
         /// flush the command queue
-        /// not thread safe. Should be called between scheduels
+        /// not thread safe. Should be called between schedules
         pub fn flushCommands(self: *World) void {
             self.commands.runAllUnsafe(self);
         }
@@ -760,7 +760,7 @@ pub fn App(comptime desc: AppDesc) type {
                 }
             };
 
-            /// a system's mem represntation
+            /// a system's mem representation
             pub const OpaqueSystem = struct {
                 access: Access(desc.FlagInt),
                 ptr: *anyopaque,
@@ -1428,7 +1428,7 @@ pub fn App(comptime desc: AppDesc) type {
             }
 
             /// remove one or many components from entity
-            /// allowes type or tuple of types.
+            /// allows type or tuple of types.
             pub fn remove(self: *const Self, entity: Entity, comptime C: anytype) EcsError!void {
                 const Info = @typeInfo(@TypeOf(C));
 
@@ -1854,7 +1854,7 @@ const ArchEntry = struct {
     set_id: u32,
 };
 
-/// cached querry values, that only need to compute once
+/// cached query values, that only need to compute once
 fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
     return struct {
         const Self = @This();
@@ -3416,7 +3416,7 @@ fn ComponentRegistry(FlagInt: type) type {
         pub fn remove(self: *Self, allocator: std.mem.Allocator, entity: Entity, comptime C: type) !void {
             const current_arch_id = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
 
-            // linear lookup in current arch is faster then the registry
+            // linear lookup in current arch is faster than the registry
             const meta = self.archtypes.items[current_arch_id].getMetaByHash(hashType(C)) orelse {
                 return;
             };
@@ -3722,7 +3722,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             return arch.getQueryIndex(&self.reg.component_flags, index, QueryStruct);
         }
 
-        /// totoal entity count for query
+        /// total entity count for query
         pub fn count(self: *const Self) usize {
             var c: usize = 0;
             for (self.state.matched_archtypes.items) |entry| {
