@@ -40,7 +40,7 @@ fn isFieldNameAllowed(comptime name: []const u8) bool {
 
 /// Enums without declared tags (`enum(u32) { _ }`) are mapped as integers.
 fn isOpaqueEnum(comptime T: type) bool {
-    return @typeInfo(T).@"enum".fields.len == 0;
+    return @typeInfo(T).@"enum".field_names.len == 0;
 }
 
 /// true when T can be produced from defaults (ints 0, enums first tag,
@@ -48,18 +48,18 @@ fn isOpaqueEnum(comptime T: type) bool {
 pub fn defaultable(comptime T: type) bool {
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => return true,
-        .pointer => |ptr| return ptr.size == .slice and ptr.is_const and ptr.child == u8,
+        .pointer => |ptr| return ptr.size == .slice and ptr.attrs.@"const" and ptr.child == u8,
         .optional => return true,
         .array => |arr| return defaultable(arr.child),
         .vector => |vec| return defaultable(vec.child),
         .@"union" => |un| {
             if (un.tag_type == null) return false;
-            const first = un.fields[0];
-            return first.type == void or defaultable(first.type);
+            const first_type = un.field_types[0];
+            return first_type == void or defaultable(first_type);
         },
         .@"struct" => |str| {
-            inline for (str.fields) |field| {
-                if (!comptime defaultable(field.type)) return false;
+            inline for (str.field_types) |f_type| {
+                if (!comptime defaultable(f_type)) return false;
             }
             return true;
         },
@@ -75,25 +75,26 @@ pub fn defaultValue(comptime T: type) T {
         .bool => return false,
         .int, .float => return 0,
         .@"enum" => |en| {
-            if (en.fields.len == 0) return @enumFromInt(0);
-            return @enumFromInt(en.fields[0].value);
+            if (en.field_names.len == 0) return @enumFromInt(0);
+            return @enumFromInt(en.field_values[0]);
         },
         .pointer => return "",
         .optional => return null,
         .array => |arr| return [_]arr.child{defaultValue(arr.child)} ** arr.len,
         .vector => |vec| return @splat(defaultValue(vec.child)),
         .@"union" => |un| {
-            const first = un.fields[0];
-            if (first.type == void) return @unionInit(T, first.name, {});
-            return @unionInit(T, first.name, defaultValue(first.type));
+            const first_name = un.field_names[0];
+            const first_type = un.field_types[0];
+            if (first_type == void) return @unionInit(T, first_name, {});
+            return @unionInit(T, first_name, defaultValue(first_type));
         },
         .@"struct" => |str| {
             var out: T = undefined;
-            inline for (str.fields) |field| {
-                @field(out, field.name) = if (comptime field.defaultValue()) |dv|
+            inline for (str.field_names, str.field_types, str.field_attrs) |f_name, f_type, f_attrs| {
+                @field(out, f_name) = if (comptime f_attrs.defaultValue(f_type)) |dv|
                     dv
                 else
-                    defaultValue(field.type);
+                    defaultValue(f_type);
             }
             return out;
         },
@@ -104,27 +105,27 @@ pub fn defaultValue(comptime T: type) T {
 pub fn isMapped(comptime T: type) bool {
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => return true,
-        .pointer => |ptr| return ptr.size == .slice and ptr.is_const and ptr.child == u8,
+        .pointer => |ptr| return ptr.size == .slice and ptr.attrs.@"const" and ptr.child == u8,
         .optional => |opt| return comptime (defaultable(opt.child) and isMapped(opt.child)),
         .array => |arr| return isMapped(arr.child),
         .vector => |vec| return isMapped(vec.child),
         .@"union" => |un| {
             if (un.tag_type == null) return false;
-            inline for (un.fields) |field| {
-                if (comptime (field.type == void or isMapped(field.type))) return true;
+            inline for (un.field_types) |f_type| {
+                if (comptime (f_type == void or isMapped(f_type))) return true;
             }
             return false;
         },
         .@"struct" => |str| {
             if (str.is_tuple) {
-                if (str.fields.len == 0) return false;
-                inline for (str.fields) |field| {
-                    if (!comptime isMapped(field.type)) return false;
+                if (str.field_names.len == 0) return false;
+                inline for (str.field_types) |f_type| {
+                    if (!comptime isMapped(f_type)) return false;
                 }
                 return true;
             }
-            inline for (str.fields) |field| {
-                if (comptime (isFieldNameAllowed(field.name) and isMapped(field.type))) return true;
+            inline for (str.field_names, str.field_types) |f_name, f_type| {
+                if (comptime (isFieldNameAllowed(f_name) and isMapped(f_type))) return true;
             }
             return false;
         },
@@ -179,14 +180,14 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, ptr: anytype) anyerror!void {
         .@"struct" => |str| {
             try w.writeAll("{");
             var first = true;
-            inline for (str.fields) |field| {
-                const writable = comptime (isFieldNameAllowed(field.name) and isMapped(field.type));
+            inline for (str.field_names, str.field_types) |f_name, f_type| {
+                const writable = comptime (isFieldNameAllowed(f_name) and isMapped(f_type));
                 if (writable) {
                     if (!first) try w.writeAll(",");
                     first = false;
-                    try writeJsonStr(w, field.name);
+                    try writeJsonStr(w, f_name);
                     try w.writeAll(":");
-                    try writeValue(field.type, w, &@field(ptr.*, field.name));
+                    try writeValue(f_type, w, &@field(ptr.*, f_name));
                 }
             }
             try w.writeAll("}");
@@ -220,15 +221,15 @@ fn writeSchema(comptime T: type, w: *std.Io.Writer) anyerror!void {
     switch (comptime @typeInfo(T)) {
         .@"struct" => |str| {
             if (!str.is_tuple) {
-                inline for (str.fields) |field| {
-                    const writable = comptime (isFieldNameAllowed(field.name) and isMapped(field.type));
+                inline for (str.field_names, str.field_types) |f_name, f_type| {
+                    const writable = comptime (isFieldNameAllowed(f_name) and isMapped(f_type));
                     if (writable) {
                         if (!first) try w.writeAll(",");
                         first = false;
                         try w.writeAll("{\"name\":");
-                        try writeJsonStr(w, field.name);
+                        try writeJsonStr(w, f_name);
                         try w.writeAll(",\"type\":");
-                        try writeJsonStr(w, @typeName(field.type));
+                        try writeJsonStr(w, @typeName(f_type));
                         try w.writeAll("}");
                     }
                 }
@@ -320,16 +321,16 @@ fn applyValue(comptime T: type, gpa: std.mem.Allocator, dst: anytype, value: std
             const entry = it.next().?;
             const key = entry.key_ptr.*;
             var matched = false;
-            inline for (un.fields) |field| {
-                const settable = comptime (field.type == void or isMapped(field.type));
-                if (settable and !matched and std.mem.eql(u8, key, field.name)) {
+            inline for (un.field_names, un.field_types) |f_name, f_type| {
+                const settable = comptime (f_type == void or isMapped(f_type));
+                if (settable and !matched and std.mem.eql(u8, key, f_name)) {
                     matched = true;
-                    if (comptime field.type == void) {
-                        dst.* = @unionInit(T, field.name, {});
+                    if (comptime f_type == void) {
+                        dst.* = @unionInit(T, f_name, {});
                     } else {
-                        var tmp = defaultValue(field.type);
-                        try applyValue(field.type, gpa, &tmp, entry.value_ptr.*);
-                        dst.* = @unionInit(T, field.name, tmp);
+                        var tmp = defaultValue(f_type);
+                        try applyValue(f_type, gpa, &tmp, entry.value_ptr.*);
+                        dst.* = @unionInit(T, f_name, tmp);
                     }
                 }
             }
@@ -341,9 +342,9 @@ fn applyValue(comptime T: type, gpa: std.mem.Allocator, dst: anytype, value: std
                     .array => |a| a.items,
                     else => return error.ExpectedArray,
                 };
-                if (items.len != str.fields.len) return error.ArrayLengthMismatch;
-                inline for (str.fields, 0..) |field, i| {
-                    try applyValue(field.type, gpa, &@field(dst.*, field.name), items[i]);
+                if (items.len != str.field_names.len) return error.ArrayLengthMismatch;
+                inline for (str.field_names, str.field_types, items) |f_name, f_type, item| {
+                    try applyValue(f_type, gpa, &@field(dst.*, f_name), item);
                 }
                 return;
             }
@@ -355,11 +356,11 @@ fn applyValue(comptime T: type, gpa: std.mem.Allocator, dst: anytype, value: std
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
                 var matched = false;
-                inline for (str.fields) |field| {
-                    const settable = comptime (isFieldNameAllowed(field.name) and isMapped(field.type));
-                    if (settable and !matched and std.mem.eql(u8, key, field.name)) {
+                inline for (str.field_names, str.field_types) |f_name, f_type| {
+                    const settable = comptime (isFieldNameAllowed(f_name) and isMapped(f_type));
+                    if (settable and !matched and std.mem.eql(u8, key, f_name)) {
                         matched = true;
-                        try applyValue(field.type, gpa, &@field(dst.*, field.name), entry.value_ptr.*);
+                        try applyValue(f_type, gpa, &@field(dst.*, f_name), entry.value_ptr.*);
                     }
                 }
                 if (!matched) return error.UnknownField;
