@@ -747,9 +747,15 @@ pub fn App(comptime desc: AppDesc) type {
                         @compileError("Schedule must be an enum");
                     }
 
+                    const backingInt = @backingInt(schedule);
                     return .{
                         .type_id = hashType(T),
-                        .value = @intFromEnum(schedule),
+                        .value = switch (@typeInfo(@TypeOf(backingInt))) {
+                            .int => |info| if (info.signedness == .signed)
+                                @bitCast(@as(i32, backingInt))
+                                else @intCast(backingInt),
+                            else => unreachable
+                        },
                     };
                 }
             };
@@ -2386,7 +2392,8 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
 
         pub inline fn getFlagFromHash(self: *const Self, hash: u32) ?Flag {
             const len = @atomicLoad(usize, &self.registered_len, .acquire);
-            for (self.registered_hash[0..len], 0..) |h, i| if (h == hash) return @enumFromInt(i);
+            for (self.registered_hash[0..len], 0..) |h, i| if (h == hash)
+                return @fromBackingInt(@intCast(i));
             return null;
         }
 
@@ -2397,7 +2404,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             for (self.registered_hash[0..len], 0..) |h, i| {
                 if (h == hash) {
                     self.refreshAfterReload(i, T);
-                    return @enumFromInt(i);
+                    return @fromBackingInt(@intCast(i));
                 }
             }
 
@@ -2408,7 +2415,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             for (self.registered_hash[0..locked_len], 0..) |h, i| {
                 if (h == hash) {
                     self.refreshAfterReload(i, T);
-                    return @enumFromInt(i);
+                    return @fromBackingInt(@intCast(i));
                 }
             }
 
@@ -2426,7 +2433,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             };
 
             @atomicStore(usize, &self.registered_len, index + 1, .release);
-            return @enumFromInt(index);
+            return @fromBackingInt(@intCast(index));
         }
 
         /// Called on every name-hash match. After a hot reload the world
@@ -2479,8 +2486,8 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
         }
 
         pub fn getId(self: *const Self, flag: Flag) *const Info {
-            assert(@intFromEnum(flag) < self.registered_len);
-            return &self.registered_buf[@intFromEnum(flag)];
+            assert(@backingInt(flag) < self.registered_len);
+            return &self.registered_buf[@backingInt(flag)];
         }
     };
 }

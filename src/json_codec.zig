@@ -75,8 +75,8 @@ pub fn defaultValue(comptime T: type) T {
         .bool => return false,
         .int, .float => return 0,
         .@"enum" => |en| {
-            if (en.field_names.len == 0) return @enumFromInt(0);
-            return @enumFromInt(en.field_values[0]);
+            if (en.field_names.len == 0) return @fromBackingInt(0);
+            return @fromBackingInt(en.field_values[0]);
         },
         .pointer => return "",
         .optional => return null,
@@ -150,11 +150,11 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, ptr: anytype) anyerror!void {
         },
         .@"enum" => {
             if (comptime isOpaqueEnum(T)) {
-                try w.print("{d}", .{@intFromEnum(ptr.*)});
+                try w.print("{d}", .{@backingInt(ptr.*)});
             } else {
                 // Runtime values can be outside the declared tags (raw casts
                 // in game code); never let @tagName panic.
-                const raw = @intFromEnum(ptr.*);
+                const raw = @backingInt(ptr.*);
                 const name = std.enums.tagName(T, ptr.*);
                 if (name) |n| try writeJsonStr(w, n) else try w.print("{d}", .{raw});
             }
@@ -268,7 +268,7 @@ fn applyValue(comptime T: type, gpa: std.mem.Allocator, dst: anytype, value: std
                     .integer => |i| std.math.cast(@typeInfo(T).@"enum".tag_type, i) orelse return error.IntOutOfRange,
                     else => return error.ExpectedNumber,
                 };
-                dst.* = @enumFromInt(raw);
+                dst.* = @fromBackingInt(raw);
             } else {
                 dst.* = switch (value) {
                     .string => |s| std.meta.stringToEnum(T, s) orelse return error.UnknownEnumTag,
