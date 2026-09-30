@@ -318,9 +318,11 @@ pub fn propagate_global_transform(
     query: kn.Query(struct { t: *const Transform, gt: *GlobalTransform, children: ?*kn.Children }),
 ) !void{
     var it = roots.iter();
-    var wg = std.Thread.WorkGroup{};
-    while(it.next()) |entity| try jobs.go(&wg, propgate_tree, .{entity, query});
-    wg.wait();
+    var group: std.Io.Group = .init;
+    while(it.next()) |entity| try jobs.go(&group, propagate_tree, .{entity, query});
+    group.await(jobs.io) catch |err| {
+        // Handle errors such as error.Canceled here
+    };
 }
 // (this is just an example, in a real app, you should batch work)
 ```

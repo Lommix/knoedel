@@ -1345,11 +1345,11 @@ pub fn App(comptime desc: AppDesc) type {
             io: std.Io,
 
             pub fn fromWorld(world: *World) EcsError!Self {
-                return Jobs{ .io = world.io };
+                return .{ .io = world.io };
             }
 
             pub fn go(self: *const Self, group: *std.Io.Group, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) EcsError!void {
-                std.Io.Group.async(group, self.io, func, args);
+                group.async(self.io, func, args);
             }
         };
 
