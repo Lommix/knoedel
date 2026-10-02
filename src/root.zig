@@ -1,7 +1,6 @@
 pub const ecs = @import("ecs.zig");
 pub const ev = @import("events.zig");
 pub const st = @import("state.zig");
-pub const std = @import("std");
 
 pub const MB: usize = 1024 * 1000;
 pub const GB: usize = MB * 1000;
@@ -43,7 +42,7 @@ pub fn Knoedel(cfg: AppDesc) type {
         pub const hashType = ecs.hashType;
         pub const Children = ecs.Children;
         pub const Parent = ecs.Parent;
-        pub const ResouceRegistry = ecs.ResourceRegistry(cfg.FlagInt);
+        pub const ResourceRegistry = ecs.ResourceRegistry(cfg.FlagInt);
         pub const ConditionFn = App.SystemRegistry.ConditionFn;
         pub const SystemFn = App.SystemRegistry.SystemFn;
         pub const Error = ecs.EcsError;

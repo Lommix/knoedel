@@ -7,7 +7,7 @@ Heavily inspired by the rust ECS `Bevy`.
 
 (Very similar API)
 
-**zig version: 0.16.0**
+**zig version: 0.17.0**
 
 ## Features
 
@@ -180,7 +180,7 @@ Take a look at `ResMut` or any other baseline arg for further information.
 // example: System on a timer using locals
 pub fn OnTimer(comptime delta: f32) kn.App.SystemRegistry.ConditionFn {
     return (struct {
-        fn on_timer(world: *kn.App, locals: *kn.ResouceRegistry) !bool {
+        fn on_timer(world: *kn.App, locals: *kn.ResourceRegistry) !bool {
             // `SystemTimer` is a simple state struct with `tick` func
             var timer = locals.get(SystemTimer) orelse blk: {
                 try locals.register(world.memtator.world(), SystemTimer{
@@ -318,9 +318,11 @@ pub fn propagate_global_transform(
     query: kn.Query(struct { t: *const Transform, gt: *GlobalTransform, children: ?*kn.Children }),
 ) !void{
     var it = roots.iter();
-    var wg = std.Thread.WorkGroup{};
-    while(it.next()) |entity| try jobs.go(&wg, propgate_tree, .{entity, query});
-    wg.wait();
+    var group: std.Io.Group = .init;
+    while(it.next()) |entity| try jobs.go(&group, propagate_tree, .{entity, query});
+    group.await(jobs.io) catch |err| {
+        // Handle errors such as error.Canceled here
+    };
 }
 // (this is just an example, in a real app, you should batch work)
 ```

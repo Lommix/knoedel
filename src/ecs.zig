@@ -5,7 +5,6 @@
 //***********************************************************
 
 const std = @import("std");
-const builtin = @import("builtin");
 const assert = std.debug.assert;
 const cprint = std.fmt.comptimePrint;
 const json_codec = @import("json_codec.zig");
@@ -233,10 +232,10 @@ pub fn App(comptime desc: AppDesc) type {
             const FnType = @typeInfo(@TypeOf(system_fn)).pointer.child;
             const info = @typeInfo(FnType);
 
-            var sys_args: SystemRegistry.genArgType(info.@"fn".params) = undefined;
+            var sys_args: SystemRegistry.genArgType(info.@"fn".param_types) = undefined;
 
-            inline for (info.@"fn".params, 0..) |*p, i| {
-                const Ty = p.type.?;
+            inline for (info.@"fn".param_types, 0..) |param_type, i| {
+                const Ty = param_type orelse @compileError("generic parameter not allowed");
                 if (@hasDecl(Ty, "fromWorld")) {
                     var ret = try Ty.fromWorld(self);
                     if (@hasDecl(Ty, "setWorldTick")) ret.setWorldTick(self.world_tick);
@@ -311,7 +310,7 @@ pub fn App(comptime desc: AppDesc) type {
         }
 
         /// update tick
-        /// runs all remainig commands and resets the frame arena
+        /// runs all remaining commands and resets the frame arena
         pub fn update(self: *World) void {
             self.flushCommands();
             _ = self.memtator.resetFrame();
@@ -592,7 +591,7 @@ pub fn App(comptime desc: AppDesc) type {
         }
 
         /// flush the command queue
-        /// not thread safe. Should be called between scheduels
+        /// not thread safe. Should be called between schedules
         pub fn flushCommands(self: *World) void {
             self.commands.runAllUnsafe(self);
         }
@@ -747,14 +746,20 @@ pub fn App(comptime desc: AppDesc) type {
                         @compileError("Schedule must be an enum");
                     }
 
+                    const backingInt = @backingInt(schedule);
                     return .{
                         .type_id = hashType(T),
-                        .value = @intFromEnum(schedule),
+                        .value = switch (@typeInfo(@TypeOf(backingInt))) {
+                            .int => |info| if (info.signedness == .signed)
+                                @bitCast(@as(i32, backingInt))
+                                else @intCast(backingInt),
+                            else => unreachable
+                        },
                     };
                 }
             };
 
-            /// a system's mem represntation
+            /// a system's mem representation
             pub const OpaqueSystem = struct {
                 access: Access(desc.FlagInt),
                 ptr: *anyopaque,
@@ -895,19 +900,19 @@ pub fn App(comptime desc: AppDesc) type {
                 const info = @typeInfo(fnType);
 
                 var access: Access(desc.FlagInt) = .{};
-                inline for (info.@"fn".params) |*p| {
-                    const PT = p.type.?;
-                    if (@typeInfo(PT) != .@"struct") @compileError(cprint("System param must be struct with method `fromWorld(w:*World)Self` in `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
+                inline for (info.@"fn".param_types) |maybe_pt| {
+                    const PT = maybe_pt orelse @compileError("generic function not allowed here");
+                    if (@typeInfo(PT) != .@"struct") @compileError(cprint("System param must be struct with method `fromWorld(w:*World)Self` in `{s}::{s}`\n", .{ fn_name, @typeName(PT) }));
 
                     if (@hasDecl(PT, "addAccess")) {
                         PT.addAccess(app, &access);
                     } else {
                         switch (@typeInfo(PT)) {
                             .@"struct" => |str| {
-                                inline for (str.fields) |field| {
-                                    if (@typeInfo(field.type) != .@"struct") continue;
-                                    if (@hasDecl(field.type, "addAccess")) {
-                                        field.type.addAccess(app, &access);
+                                inline for (str.field_types) |f_type| {
+                                    if (@typeInfo(f_type) != .@"struct") continue;
+                                    if (@hasDecl(f_type, "addAccess")) {
+                                        f_type.addAccess(app, &access);
                                     }
                                 }
                             },
@@ -925,10 +930,10 @@ pub fn App(comptime desc: AppDesc) type {
                         fn run(ptr: *anyopaque, world: *World, locals: *LocalRegistry(desc.FlagInt), last_run_tick: u32) EcsError!void {
                             @setEvalBranchQuota(6400);
                             const sys_func: *fnType = @ptrCast(@alignCast(ptr));
-                            var sys_args: genArgType(info.@"fn".params) = undefined;
-                            inline for (info.@"fn".params, 0..) |*p, i| {
-                                const PT = switch (@typeInfo(p.type.?)) {
-                                    .@"struct" => p.type.?,
+                            var sys_args: genArgType(info.@"fn".param_types) = undefined;
+                            inline for (info.@"fn".param_types, 0..) |param_type, i| {
+                                const PT: type = switch (@typeInfo(param_type orelse @compileError("generic parameter not allowed"))) {
+                                    .@"struct" => param_type.?,
                                     else => @compileError("not a valid system param type, needs to be a struct"),
                                 };
 
@@ -955,28 +960,29 @@ pub fn App(comptime desc: AppDesc) type {
                                 switch (@typeInfo(PT)) {
                                     .@"struct" => |str| {
                                         var compound: PT = undefined;
-                                        inline for (str.fields) |field| {
-                                            if (@hasDecl(field.type, "fromLocal")) {
-                                                var ret = try field.type.fromLocal(world, locals);
-                                                if (@hasDecl(field.type, "setWorldTick")) ret.setWorldTick(last_run_tick);
-                                                @field(compound, field.name) = ret;
+                                        inline for (str.field_names, str.field_types) |f_name, f_type| {
+
+                                            if (@hasDecl(f_type, "fromLocal")) {
+                                                var ret = try f_type.fromLocal(world, locals);
+                                                if (@hasDecl(f_type, "setWorldTick")) ret.setWorldTick(last_run_tick);
+                                                @field(compound, f_name) = ret;
                                                 continue;
                                             }
 
-                                            if (@hasDecl(field.type, "fromWorld")) {
-                                                var ret = try field.type.fromWorld(world);
-                                                if (@hasDecl(field.type, "setWorldTick")) ret.setWorldTick(last_run_tick);
-                                                @field(compound, field.name) = ret;
+                                            if (@hasDecl(f_type, "fromWorld")) {
+                                                var ret = try f_type.fromWorld(world);
+                                                if (@hasDecl(f_type, "setWorldTick")) ret.setWorldTick(last_run_tick);
+                                                @field(compound, f_name) = ret;
                                                 continue;
                                             }
 
-                                            if (@hasDecl(field.type, "is_local_marker")) {
-                                                const res = try locals.getOrDefault(world.memtator.world(), field.type.innerType);
-                                                @field(compound, field.name) = field.type{ .inner = res };
+                                            if (@hasDecl(f_type, "is_local_marker")) {
+                                                const res = try locals.getOrDefault(world.memtator.world(), f_type.innerType);
+                                                @field(compound, f_name) = f_type{ .inner = res };
                                                 continue;
                                             }
 
-                                            @compileError(cprint("compund system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
+                                            @compileError(cprint("compound system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(PT) }));
                                         }
 
                                         @field(sys_args, cprint("{d}", .{i})) = compound;
@@ -985,7 +991,7 @@ pub fn App(comptime desc: AppDesc) type {
                                     else => {},
                                 }
 
-                                @compileError(cprint("system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(p.type.?) }));
+                                @compileError(cprint("system param does not implement fromWorld! (fn(world:*App)Self)  `{s}::{s}`\n", .{ fn_name, @typeName(PT) }));
                             }
 
                             try @call(.auto, sys_func, sys_args);
@@ -1064,9 +1070,9 @@ pub fn App(comptime desc: AppDesc) type {
                 }
             }
 
-            fn genArgType(comptime fnargs: []const std.builtin.Type.Fn.Param) type {
-                var types: [fnargs.len]type = undefined;
-                for (fnargs, 0..) |*p, i| types[i] = p.type.?;
+            fn genArgType(comptime maybe_types: []const ?type) type {
+                var types: [maybe_types.len]type = undefined;
+                for (&types, maybe_types) |*d, s| d.* = s orelse @compileError("generic parameter not allowed");
                 return @Tuple(&types);
             }
 
@@ -1289,7 +1295,7 @@ pub fn App(comptime desc: AppDesc) type {
                 const _read = [1]u32{hashType(R)};
                 inner: *const R = undefined,
 
-                fn fromWorld(world: *const World) EcsError!Self {
+                pub fn fromWorld(world: *const World) EcsError!Self {
                     var self = Self{};
                     self.inner = try world.resource(R);
                     return self;
@@ -1312,7 +1318,7 @@ pub fn App(comptime desc: AppDesc) type {
                 const _read = [1]u32{hashType(R)};
                 const _write = _read;
                 inner: *R = undefined,
-                fn fromWorld(world: *World) EcsError!Self {
+                pub fn fromWorld(world: *World) EcsError!Self {
                     var self = Self{};
                     self.inner = try world.resource(R);
                     return self;
@@ -1338,11 +1344,11 @@ pub fn App(comptime desc: AppDesc) type {
             io: std.Io,
 
             pub fn fromWorld(world: *World) EcsError!Self {
-                return Jobs{ .io = world.io };
+                return .{ .io = world.io };
             }
 
             pub fn go(self: *const Self, group: *std.Io.Group, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) EcsError!void {
-                std.Io.Group.async(group, self.io, func, args);
+                group.async(self.io, func, args);
             }
         };
 
@@ -1421,7 +1427,7 @@ pub fn App(comptime desc: AppDesc) type {
             }
 
             /// remove one or many components from entity
-            /// allowes type or tuple of types.
+            /// allows type or tuple of types.
             pub fn remove(self: *const Self, entity: Entity, comptime C: anytype) EcsError!void {
                 const Info = @typeInfo(@TypeOf(C));
 
@@ -1794,7 +1800,7 @@ pub fn App(comptime desc: AppDesc) type {
 
                                 // hooks
                                 const info = @typeInfo(ArgType);
-                                if (!info.@"struct".fields[i].is_comptime) {
+                                if (!info.@"struct".field_attrs[i].@"comptime") {
                                     const flag = world.components.component_flags.getFlag(CompType);
                                     try world.hooks.runAddedHook(flag, &args.bundle[i], args.ent, world);
                                 }
@@ -1847,7 +1853,7 @@ const ArchEntry = struct {
     set_id: u32,
 };
 
-/// cached querry values, that only need to compute once
+/// cached query values, that only need to compute once
 fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
     return struct {
         const Self = @This();
@@ -1875,11 +1881,11 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
         }
 
         pub fn build_access_set(self: *Self, flags: *FlagSet) void {
-            var include = FlagSet.Set.initEmpty();
+            var include = FlagSet.Set.empty;
 
             const QueryInfo = @typeInfo(Q);
-            inline for (QueryInfo.@"struct".fields) |field| {
-                const info = @typeInfo(field.type);
+            inline for (QueryInfo.@"struct".field_types) |f_type| {
+                const info = @typeInfo(f_type);
                 switch (info) {
                     .pointer => |ptr| {
                         const comp_id = flags.getFlag(ptr.child);
@@ -1918,14 +1924,14 @@ fn QueryState(FlagInt: type, comptime Q: type, comptime F: Filter) type {
 
 fn AccessSet(FlagInt: type) type {
     return struct {
-        with: HeapFlagSet(FlagInt).Set = .initEmpty(),
-        without: HeapFlagSet(FlagInt).Set = .initEmpty(),
-        added: HeapFlagSet(FlagInt).Set = .initEmpty(),
-        changed: HeapFlagSet(FlagInt).Set = .initEmpty(),
+        with: HeapFlagSet(FlagInt).Set = .empty,
+        without: HeapFlagSet(FlagInt).Set = .empty,
+        added: HeapFlagSet(FlagInt).Set = .empty,
+        changed: HeapFlagSet(FlagInt).Set = .empty,
 
         pub fn matches(self: *const @This(), other: HeapFlagSet(FlagInt).Set) bool {
             if (!self.with.intersectWith(other).eql(self.with)) return false;
-            return self.without.intersectWith(other).eql(.initEmpty());
+            return self.without.intersectWith(other).eql(.empty);
         }
     };
 }
@@ -2098,7 +2104,7 @@ pub const Filter = union(enum) {
                     s.with.insert(flag);
                     s.added.insert(flag);
                 } else {
-                    s.without = .initFull();
+                    s.without = .full;
                 }
                 out[offset] = s;
                 return offset + 1;
@@ -2109,7 +2115,7 @@ pub const Filter = union(enum) {
                     s.with.insert(flag);
                     s.changed.insert(flag);
                 } else {
-                    s.without = .initFull();
+                    s.without = .full;
                 }
 
                 out[offset] = s;
@@ -2120,7 +2126,7 @@ pub const Filter = union(enum) {
                 if (flags.getFlagFromHash(hash)) |flag| {
                     s.with.insert(flag);
                 } else {
-                    s.without = .initFull();
+                    s.without = .full;
                 }
                 out[offset] = s;
                 return offset + 1;
@@ -2214,7 +2220,7 @@ pub fn Local(comptime T: type) type {
         inner: *T = undefined,
 
         const Self = @This();
-        const is_local_marker: bool = true;
+        pub const is_local_marker: bool = true;
         const innerType = T;
 
         pub inline fn get(self: *Self) *T {
@@ -2225,7 +2231,7 @@ pub fn Local(comptime T: type) type {
 
 pub fn Has(comptime T: type) type {
     return struct {
-        const _is_has: bool = true;
+        pub const _is_has: bool = true;
         const inner = T;
         val: bool = false,
     };
@@ -2385,7 +2391,8 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
 
         pub inline fn getFlagFromHash(self: *const Self, hash: u32) ?Flag {
             const len = @atomicLoad(usize, &self.registered_len, .acquire);
-            for (self.registered_hash[0..len], 0..) |h, i| if (h == hash) return @enumFromInt(i);
+            for (self.registered_hash[0..len], 0..) |h, i| if (h == hash)
+                return @fromBackingInt(@intCast(i));
             return null;
         }
 
@@ -2396,7 +2403,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             for (self.registered_hash[0..len], 0..) |h, i| {
                 if (h == hash) {
                     self.refreshAfterReload(i, T);
-                    return @enumFromInt(i);
+                    return @fromBackingInt(@intCast(i));
                 }
             }
 
@@ -2407,7 +2414,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             for (self.registered_hash[0..locked_len], 0..) |h, i| {
                 if (h == hash) {
                     self.refreshAfterReload(i, T);
-                    return @enumFromInt(i);
+                    return @fromBackingInt(@intCast(i));
                 }
             }
 
@@ -2425,7 +2432,7 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
             };
 
             @atomicStore(usize, &self.registered_len, index + 1, .release);
-            return @enumFromInt(index);
+            return @fromBackingInt(@intCast(index));
         }
 
         /// Called on every name-hash match. After a hot reload the world
@@ -2447,16 +2454,16 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
 
         fn makePrintFn(comptime T: type) ?*const fn (*const anyopaque, *std.Io.Writer) EcsError!void {
             return (struct {
-                fn fmt(ptr: *const anyopaque, w: *std.Io.Writer) EcsError!void {
+                pub fn fmt(ptr: *const anyopaque, w: *std.Io.Writer) EcsError!void {
                     const comp: *const T = @ptrCast(@alignCast(ptr));
                     if (@hasDecl(T, "fmt")) {
                         try comp.fmt(w);
                     } else {
                         switch (@typeInfo(T)) {
                             .@"struct" => |str| {
-                                inline for (str.fields, 0..) |field, i| {
-                                    try w.print(".{s}: {any},", .{ field.name, @field(comp, field.name) });
-                                    if (i < str.fields.len -| 1) try w.print("\n", .{});
+                                inline for (str.field_names, 0..) |f_name, i| {
+                                    try w.print(".{s}: {any},", .{ f_name, @field(comp, f_name) });
+                                    if (i < str.field_names.len -| 1) try w.print("\n", .{});
                                 }
                             },
                             else => try w.writeAll("uknown"),
@@ -2478,8 +2485,8 @@ pub fn HeapFlagSet(comptime FlagInt: type) type {
         }
 
         pub fn getId(self: *const Self, flag: Flag) *const Info {
-            assert(@intFromEnum(flag) < self.registered_len);
-            return &self.registered_buf[@intFromEnum(flag)];
+            assert(@backingInt(flag) < self.registered_len);
+            return &self.registered_buf[@backingInt(flag)];
         }
     };
 }
@@ -2506,14 +2513,14 @@ pub fn Access(FlagInt: type) type {
         }
 
         inline fn comp_compatible(self: *const Self, other: *const Self) bool {
-            const empty = FlagSet.Set.initEmpty();
+            const empty = FlagSet.Set.empty;
             if (!self.comp_read_write.intersectWith(other.comp_write).eql(empty)) return false;
             if (!self.comp_write.intersectWith(other.comp_read_write).eql(empty)) return false;
             return true;
         }
 
         inline fn res_compatible(self: *const Self, other: *const Self) bool {
-            const empty = FlagSet.Set.initEmpty();
+            const empty = FlagSet.Set.empty;
             if (!self.res_read_write.intersectWith(other.res_write).eql(empty)) return false;
             if (!self.res_write.intersectWith(other.res_read_write).eql(empty)) return false;
             return true;
@@ -2541,8 +2548,8 @@ pub fn ArchType(FlagInt: type) type {
         pub fn queryMetaCount(comptime Q: type) usize {
             const info = @typeInfo(Q).@"struct";
             comptime var count: usize = 0;
-            inline for (info.fields) |field| {
-                if (field.type == Entity or field.type == Meta or @sizeOf(field.type) == 0) continue;
+            inline for (info.field_types) |f_type| {
+                if (f_type == Entity or f_type == Meta or @sizeOf(f_type) == 0) continue;
                 count += 1;
             }
             return count;
@@ -2572,7 +2579,7 @@ pub fn ArchType(FlagInt: type) type {
         };
         /// allocate in chunks of:
         chunk_size: usize = 512,
-        mask: HeapFlagSet(FlagInt).Set = .initEmpty(),
+        mask: HeapFlagSet(FlagInt).Set = .empty,
         bytes: []u8 = &.{},
         alignment: usize = 0,
         allocated_table_alignment: std.mem.Alignment = .fromByteUnits(16),
@@ -2937,53 +2944,53 @@ pub fn ArchType(FlagInt: type) type {
             var row: Q = undefined;
             const info = @typeInfo(Q).@"struct";
 
-            inline for (info.fields) |field| {
+            inline for (info.field_names, info.field_types) |f_name, f_type| {
                 // entity
-                if (field.type == Entity) {
-                    @field(row, field.name) = self.getEntity(index);
+                if (f_type == Entity) {
+                    @field(row, f_name) = self.getEntity(index);
                     continue;
                 }
                 // meta
-                if (field.type == Meta) {
-                    @field(row, field.name) = .{
+                if (f_type == Meta) {
+                    @field(row, f_name) = .{
                         ._columns = self.columns.items,
                         ._mask = &self.mask,
                     };
                     continue;
                 }
                 // skip tags
-                if (@sizeOf(field.type) == 0) {
-                    @field(row, field.name) = .{};
+                if (@sizeOf(f_type) == 0) {
+                    @field(row, f_name) = .{};
                     continue;
                 }
 
-                if (@typeInfo(field.type) == .@"struct") {
-                    if (@hasDecl(field.type, "_is_has")) {
-                        const flag = flags.getFlag(field.type.inner);
+                if (@typeInfo(f_type) == .@"struct") {
+                    if (@hasDecl(f_type, "_is_has")) {
+                        const flag = flags.getFlag(f_type.inner);
                         const has = self.mask.contains(flag);
-                        @field(row, field.name) = .{ .val = has };
+                        @field(row, f_name) = .{ .val = has };
                         continue;
                     }
                 }
 
-                const field_ptr = switch (@typeInfo(field.type)) {
-                    .pointer => @typeInfo(field.type).pointer,
+                const field_ptr = switch (@typeInfo(f_type)) {
+                    .pointer => @typeInfo(f_type).pointer,
                     .optional => |opt| @typeInfo(opt.child).pointer,
-                    else => @compileError("Type not allowed: " ++ field.name),
+                    else => @compileError("Type not allowed: " ++ f_name),
                 };
 
                 const hash = comptime hashType(field_ptr.child);
                 if (self.getMetaByHash(hash)) |meta| {
-                    if (field_ptr.is_const) {
+                    if (field_ptr.attrs.@"const") {
                         const raw_bytes = self.getSingleRawConst(index, meta);
-                        @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
+                        @field(row, f_name) = @ptrCast(@alignCast(raw_bytes));
                     } else {
                         const raw_bytes = self.getSingleRaw(index, meta);
-                        @field(row, field.name) = @ptrCast(@alignCast(raw_bytes));
+                        @field(row, f_name) = @ptrCast(@alignCast(raw_bytes));
                     }
                 } else {
-                    if (@typeInfo(field.type) == .optional) {
-                        @field(row, field.name) = null;
+                    if (@typeInfo(f_type) == .optional) {
+                        @field(row, f_name) = null;
                     } else {
                         return EcsError.ComponentNotFound;
                     }
@@ -2999,45 +3006,45 @@ pub fn ArchType(FlagInt: type) type {
             const info = @typeInfo(Q).@"struct";
             comptime var meta_idx: usize = 0;
 
-            inline for (info.fields) |field| {
-                if (field.type == Entity) {
-                    @field(row, field.name) = self.getEntity(index);
+            inline for (info.field_names, info.field_types) |f_name, f_type| {
+                if (f_type == Entity) {
+                    @field(row, f_name) = self.getEntity(index);
                     continue;
                 }
-                if (field.type == Meta) {
-                    @field(row, field.name) = .{
+                if (f_type == Meta) {
+                    @field(row, f_name) = .{
                         ._columns = self.columns.items,
                         ._mask = &self.mask,
                     };
                     continue;
                 }
-                if (@sizeOf(field.type) == 0) {
-                    @field(row, field.name) = .{};
+                if (@sizeOf(f_type) == 0) {
+                    @field(row, f_name) = .{};
                     continue;
                 }
-                if (@typeInfo(field.type) == .@"struct") {
-                    if (@hasDecl(field.type, "_is_has")) {
-                        @field(row, field.name) = .{ .val = cached_metas[meta_idx] != null };
+                if (@typeInfo(f_type) == .@"struct") {
+                    if (@hasDecl(f_type, "_is_has")) {
+                        @field(row, f_name) = .{ .val = cached_metas[meta_idx] != null };
                         meta_idx += 1;
                         continue;
                     }
                 }
 
-                const field_ptr = switch (@typeInfo(field.type)) {
-                    .pointer => @typeInfo(field.type).pointer,
+                const field_ptr = switch (@typeInfo(f_type)) {
+                    .pointer => @typeInfo(f_type).pointer,
                     .optional => |opt| @typeInfo(opt.child).pointer,
-                    else => @compileError("Type not allowed: " ++ field.name),
+                    else => @compileError("Type not allowed: " ++ f_name),
                 };
 
                 if (cached_metas[meta_idx]) |meta| {
-                    if (field_ptr.is_const) {
-                        @field(row, field.name) = @ptrCast(@alignCast(self.getSingleRawConst(index, meta)));
+                    if (field_ptr.attrs.@"const") {
+                        @field(row, f_name) = @ptrCast(@alignCast(self.getSingleRawConst(index, meta)));
                     } else {
-                        @field(row, field.name) = @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
+                        @field(row, f_name) = @ptrCast(@alignCast(self.getSingleRaw(index, meta)));
                     }
                 } else {
-                    if (@typeInfo(field.type) == .optional) {
-                        @field(row, field.name) = null;
+                    if (@typeInfo(f_type) == .optional) {
+                        @field(row, f_name) = null;
                     } else {
                         unreachable;
                     }
@@ -3054,22 +3061,22 @@ pub fn ArchType(FlagInt: type) type {
             var metas: [queryMetaCount(Q)]?*const ColMeta = undefined;
             comptime var meta_idx: usize = 0;
 
-            inline for (info.fields) |field| {
-                if (field.type == Entity or field.type == Meta or @sizeOf(field.type) == 0) continue;
+            inline for (info.field_names, info.field_types) |f_name, f_type| {
+                if (f_type == Entity or f_type == Meta or @sizeOf(f_type) == 0) continue;
 
-                if (@typeInfo(field.type) == .@"struct") {
-                    if (@hasDecl(field.type, "_is_has")) {
-                        const flag = flags.getFlag(field.type.inner);
+                if (@typeInfo(f_type) == .@"struct") {
+                    if (@hasDecl(f_type, "_is_has")) {
+                        const flag = flags.getFlag(f_type.inner);
                         metas[meta_idx] = if (self.mask.contains(flag)) self.getMeta(flag) else null;
                         meta_idx += 1;
                         continue;
                     }
                 }
 
-                const field_ptr = switch (@typeInfo(field.type)) {
-                    .pointer => @typeInfo(field.type).pointer,
+                const field_ptr = switch (@typeInfo(f_type)) {
+                    .pointer => @typeInfo(f_type).pointer,
                     .optional => |opt| @typeInfo(opt.child).pointer,
-                    else => @compileError("Type not allowed: " ++ field.name),
+                    else => @compileError("Type not allowed: " ++ f_name),
                 };
                 const hash = comptime hashType(field_ptr.child);
                 metas[meta_idx] = self.getMetaByHash(hash);
@@ -3189,7 +3196,7 @@ fn ComponentRegistry(FlagInt: type) type {
             const flag = self.component_flags.getFlag(CompType);
 
             const current_arch_id = self.entity_lookup.get(entity);
-            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.empty;
 
             if (mask.contains(flag)) {
                 const arch = &self.archtypes.items[current_arch_id.?];
@@ -3235,7 +3242,7 @@ fn ComponentRegistry(FlagInt: type) type {
         /// Insert raw component bytes into an entity by flag. Used for deserialization.
         pub fn addRaw(self: *Self, allocator: std.mem.Allocator, tick: u32, entity: Entity, flag: CompFlag, bytes: []const u8) !void {
             const current_arch_id = self.entity_lookup.get(entity);
-            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.empty;
 
             if (mask.contains(flag)) {
                 const arch = &self.archtypes.items[current_arch_id.?];
@@ -3294,7 +3301,7 @@ fn ComponentRegistry(FlagInt: type) type {
             const current_arch_id = self.entity_lookup.get(entity);
             const is_new_entity = current_arch_id == null;
 
-            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.initEmpty();
+            var mask = if (current_arch_id) |aid| self.archtypes.items[aid].mask else HeapFlagSet(FlagInt).Set.empty;
             const old_mask = mask;
             inline for (bundle) |comp| {
                 const CompType = @TypeOf(comp);
@@ -3408,7 +3415,7 @@ fn ComponentRegistry(FlagInt: type) type {
         pub fn remove(self: *Self, allocator: std.mem.Allocator, entity: Entity, comptime C: type) !void {
             const current_arch_id = self.entity_lookup.get(entity) orelse return EcsError.EntityNotFound;
 
-            // linear lookup in current arch is faster then the registry
+            // linear lookup in current arch is faster than the registry
             const meta = self.archtypes.items[current_arch_id].getMetaByHash(hashType(C)) orelse {
                 return;
             };
@@ -3444,7 +3451,7 @@ fn ArchScope(FlagInt: type) type {
 fn ArchSopeIter(FlagInt: type, comptime arch_only: bool) type {
     return struct {
         const Self = @This();
-        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        const empty = HeapFlagSet(FlagInt).Set.empty;
 
         const Result = if (arch_only) *ArchType(FlagInt) else ArchScope(FlagInt);
 
@@ -3491,7 +3498,7 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *con
 
     return struct {
         const Self = @This();
-        const empty = HeapFlagSet(FlagInt).Set.initEmpty();
+        const empty = HeapFlagSet(FlagInt).Set.empty;
         const ArchResult = if (ArchOnly) *Arch else ArchScope(FlagInt);
 
         flags: *HeapFlagSet(FlagInt),
@@ -3597,9 +3604,9 @@ pub fn QueryIter(comptime FlagInt: type, comptime Q: type, comptime filter: *con
             const index = self.offset - 1; // current iteration
             const arch = if (ArchOnly) self.current_arch.? else self.current_arch.?.arch;
             comptime var meta_idx: usize = 0;
-            inline for (@typeInfo(Q).@"struct".fields) |field| {
-                if (field.type == Entity or field.type == Arch.Meta or @sizeOf(field.type) == 0) continue;
-                const component = switch (@typeInfo(field.type)) {
+            inline for (@typeInfo(Q).@"struct".field_types) |f_type| {
+                if (f_type == Entity or f_type == Arch.Meta or @sizeOf(f_type) == 0) continue;
+                const component = switch (@typeInfo(f_type)) {
                     .pointer => |ptr| ptr.child,
                     .optional => |opt| @typeInfo(opt.child).pointer.child,
                     else => void,
@@ -3648,14 +3655,14 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
         pub fn addAccess(world: *App(desc), access: *Access(desc.FlagInt)) void {
             const flags = &world.components.component_flags;
             const QueryInfo = @typeInfo(QueryStruct);
-            inline for (QueryInfo.@"struct".fields) |field| {
-                switch (@typeInfo(field.type)) {
+            inline for (QueryInfo.@"struct".field_types) |f_type| {
+                switch (@typeInfo(f_type)) {
                     .optional => |opt| {
                         switch (@typeInfo(opt.child)) {
                             .pointer => |ptr| {
                                 const comp_id = flags.getFlag(ptr.child);
                                 access.comp_read_write.insert(comp_id);
-                                if (!ptr.is_const) access.comp_write.insert(comp_id);
+                                if (!ptr.attrs.@"const") access.comp_write.insert(comp_id);
                             },
                             else => {},
                         }
@@ -3663,7 +3670,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
                     .pointer => |ptr| {
                         const comp_id = flags.getFlag(ptr.child);
                         access.comp_read_write.insert(comp_id);
-                        if (!ptr.is_const) access.comp_write.insert(comp_id);
+                        if (!ptr.attrs.@"const") access.comp_write.insert(comp_id);
                     },
                     else => {},
                 }
@@ -3714,7 +3721,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             return arch.getQueryIndex(&self.reg.component_flags, index, QueryStruct);
         }
 
-        /// totoal entity count for query
+        /// total entity count for query
         pub fn count(self: *const Self) usize {
             var c: usize = 0;
             for (self.state.matched_archtypes.items) |entry| {
@@ -3723,7 +3730,7 @@ pub fn IQueryStructFilteredNew(comptime desc: AppDesc, comptime QueryStruct: typ
             return c;
         }
 
-        fn setWorldTick(self: *Self, tick: u32) void {
+        pub fn setWorldTick(self: *Self, tick: u32) void {
             self.world_tick = tick;
         }
 
@@ -3905,10 +3912,10 @@ pub fn WorldAccess(desc: AppDesc) type {
         inner: *App(desc),
 
         pub fn addAccess(_: *App(desc), access: *Access(desc.FlagInt)) void {
-            access.res_read_write = .initFull();
-            access.res_write = .initFull();
-            access.comp_read_write = .initFull();
-            access.comp_write = .initFull();
+            access.res_read_write = .full;
+            access.res_write = .full;
+            access.comp_read_write = .full;
+            access.comp_write = .full;
         }
 
         pub fn fromWorld(app: *App(desc)) EcsError!@This() {

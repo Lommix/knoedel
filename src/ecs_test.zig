@@ -526,7 +526,7 @@ test "scene codec exports only registered component codecs" {
                 .end_scene => try w.writeByte('s'),
                 .begin_entity => |entity| {
                     try w.writeByte('E');
-                    try w.writeInt(u64, @intFromEnum(entity), .little);
+                    try w.writeInt(u64, @backingInt(entity), .little);
                 },
                 .end_entity => try w.writeByte('e'),
                 .begin_component => |header| {
@@ -548,7 +548,7 @@ test "scene codec exports only registered component codecs" {
             return switch (try r.takeByte()) {
                 'S' => .begin_scene,
                 's' => .end_scene,
-                'E' => .{ .begin_entity = @enumFromInt(try r.takeInt(u64, .little)) },
+                'E' => .{ .begin_entity = @fromBackingInt(try r.takeInt(u64, .little)) },
                 'e' => .end_entity,
                 'C' => .{ .begin_component = .{
                     .hash = try r.takeInt(u32, .little),
@@ -643,7 +643,7 @@ test "scene codec exports entities before registered resources" {
                 .end_scene => try w.writeByte('s'),
                 .begin_entity => |entity| {
                     try w.writeByte('E');
-                    try w.writeInt(u64, @intFromEnum(entity), .little);
+                    try w.writeInt(u64, @backingInt(entity), .little);
                 },
                 .end_entity => try w.writeByte('e'),
                 .begin_component => |header| {
@@ -665,7 +665,7 @@ test "scene codec exports entities before registered resources" {
             return switch (try r.takeByte()) {
                 'S' => .begin_scene,
                 's' => .end_scene,
-                'E' => .{ .begin_entity = @enumFromInt(try r.takeInt(u64, .little)) },
+                'E' => .{ .begin_entity = @fromBackingInt(try r.takeInt(u64, .little)) },
                 'e' => .end_entity,
                 'C' => .{ .begin_component = .{
                     .hash = try r.takeInt(u32, .little),
