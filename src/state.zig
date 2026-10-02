@@ -1,4 +1,3 @@
-const std = @import("std");
 const ecs = @import("ecs.zig");
 
 pub fn StateExtension(comptime cfg: ecs.AppDesc) type {

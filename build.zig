@@ -1,6 +1,5 @@
 const std = @import("std");
 const Build = std.Build;
-const OptimizeMode = std.builtin.OptimizeMode;
 
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});

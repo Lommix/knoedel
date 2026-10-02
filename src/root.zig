@@ -1,7 +1,6 @@
 pub const ecs = @import("ecs.zig");
 pub const ev = @import("events.zig");
 pub const st = @import("state.zig");
-pub const std = @import("std");
 
 pub const MB: usize = 1024 * 1000;
 pub const GB: usize = MB * 1000;
