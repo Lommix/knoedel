@@ -18,7 +18,10 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         /// # State Resource
         /// holds current state
         pub fn State(comptime S: type) type {
-            comptime if (!@typeInfo(S).@"enum".is_exhaustive) @compileError("States must be enums");
+            const info = @typeInfo(S);
+            if (info != .@"enum" or info.@"enum".mode == .nonexhaustive)
+                @compileError("States must be exhaustive enums");
+
             return struct {
                 const Self = @This();
                 last_transition: Transition(S),
@@ -42,7 +45,7 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         }
 
         /// # StatePlugin
-        /// adds state to resources, registeres scope functions
+        /// adds state to resources, registers scope functions
         /// `Schedule`: provide cleanup schedule
         pub fn StatePlugin(comptime default_state: anytype, comptime Schedule: anytype) type {
             const StateType = @TypeOf(default_state);
@@ -81,7 +84,10 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         /// # System filter `InEnter`
         /// runs only when state is active
         pub fn InState(comptime state: anytype) FilterFunc {
-            comptime if (!@typeInfo(@TypeOf(state)).@"enum".is_exhaustive) @compileError("States must be enums");
+            const info = @typeInfo(@TypeOf(state));
+            if (info != .@"enum" or info.@"enum".mode == .nonexhaustive)
+                @compileError("States must be exhaustive enums");
+
             return (struct {
                 fn isInState(world: *App, _: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(@TypeOf(state)));
@@ -93,7 +99,10 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         /// # System filter `OnTransition`
         /// runs once on any state transition
         pub fn OnTransition(comptime S: type) FilterFunc {
-            comptime if (!@typeInfo(S).@"enum".is_exhaustive) @compileError("States must be enums");
+            const info = @typeInfo(S);
+            if (info != .@"enum" or info.@"enum".mode == .nonexhaustive)
+                @compileError("States must be exhaustive enums");
+
             return (struct {
                 fn onEnter(world: *App, locals: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(S));
@@ -111,7 +120,10 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         /// # System filter `onEnter`
         /// runs once on enter state
         pub fn OnEnter(comptime state: anytype) FilterFunc {
-            comptime if (!@typeInfo(@TypeOf(state)).@"enum".is_exhaustive) @compileError("States must be enums");
+            const info = @typeInfo(@TypeOf(state));
+            if (info != .@"enum" or info.@"enum".mode == .nonexhaustive)
+                @compileError("States must be exhaustive enums");
+
             return (struct {
                 fn onEnter(world: *App, locals: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(@TypeOf(state)));
@@ -131,7 +143,10 @@ pub fn StateExtension(comptime cfg: ecs.AppDesc) type {
         /// # System filter `onExit`
         /// runs once on exit state
         pub fn OnExit(comptime state: anytype) FilterFunc {
-            comptime if (!@typeInfo(@TypeOf(state)).@"enum".is_exhaustive) @compileError("States must be enums");
+            const info = @typeInfo(@TypeOf(state));
+            if (info != .@"enum" or info.@"enum".mode == .nonexhaustive)
+                @compileError("States must be exhaustive enums");
+
             return (struct {
                 fn onEnter(world: *App, locals: *ecs.ResourceRegistry(cfg.FlagInt)) !bool {
                     const s = try world.resource(State(@TypeOf(state)));
